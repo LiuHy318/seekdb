@@ -1,0 +1,2 @@
+{"ts":"2026-11-09T18:28:45+0800","name":"target","command":"python -m pytest -q business/tests/test_filter_feature.py","exit_code":0,"passed":14,"failed":0,"errors":0,"duration_s":0.32,"summary":"14 passed in 0.32s"}
+{"ts":"2026-11-09T18:28:46+0800","name":"regression","command":"python -m pytest -q business/tests/test_regression_baseline.py business/tests/test_http_api.py","exit_code":0,"passed":20,"failed":0,"errors":0,"duration_s":0.45,"summary":"20 passed in 0.45s"}

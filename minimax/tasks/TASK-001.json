@@ -1,0 +1,29 @@
+{
+  "task_id": "TASK-001",
+  "title": "为阅读清单服务新增按状态与最低评分的筛选",
+  "goal": "在 ReadingListService.list_items 上实现 status 与 min_rating 两个筛选参数（AND 组合、未评分条目在给出 min_rating 时排除、参数非法抛 ValueError），同时保持既有排序、分页、单条读取与 HTTP 契约不变。",
+  "spec_ids": ["SPEC-001", "SPEC-002", "SPEC-003"],
+  "query_terms": [
+    "筛选", "min_rating", "status", "未评分", "分页",
+    "排序", "total_pages", "list_items", "reading_list",
+    "ValueError", "get_item", "HTTP"
+  ],
+  "target_files": ["business/reading_list/service.py"],
+  "supporting_files": [
+    "business/reading_list/models.py",
+    "business/reading_list/data.py",
+    "business/reading_list/http_api.py"
+  ],
+  "target_tests": ["business/tests/test_filter_feature.py"],
+  "regression_tests": [
+    "business/tests/test_regression_baseline.py",
+    "business/tests/test_http_api.py"
+  ],
+  "must_preserve": [
+    "三种 sort 模式与 id 升序的稳定次序",
+    "page/page_size 校验与越界分页语义",
+    "total/total_pages 描述筛选后的全集",
+    "get_item 缺失返回 None",
+    "HTTP 400/404 错误体形状"
+  ]
+}

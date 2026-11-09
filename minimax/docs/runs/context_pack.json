@@ -1,0 +1,61 @@
+{
+  "schema": "ctxsdd/context-pack/v1",
+  "generated_at": "2026-11-09T18:30:00+0800",
+  "task": {
+    "task_id": "TASK-001",
+    "title": "为阅读清单服务新增按状态与最低评分的筛选",
+    "goal": "在 ReadingListService.list_items 上实现 status 与 min_rating 两个筛选参数",
+    "must_preserve": [
+      "三种 sort 模式与 id 升序的稳定次序",
+      "page/page_size 校验与越界分页语义",
+      "total/total_pages 描述筛选后的全集",
+      "get_item 缺失返回 None",
+      "HTTP 400/404 错误体形状"
+    ]
+  },
+  "retrieval": {
+    "engine": "OceanBase/seekdb",
+    "database": "mm_sdd",
+    "table": "mm_doc",
+    "terms": ["筛选", "min_rating", "status", "未评分", "分页", "排序", "list_items", "reading_list"]
+  },
+  "specs": {
+    "spec_ids": ["SPEC-001", "SPEC-002", "SPEC-003"],
+    "fingerprint": {
+      "count": 17,
+      "digest": "5e76fd88a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8"
+    },
+    "items": [
+      {
+        "path": "specs/SPEC-001-list-filter.md",
+        "heading": "1. 能力声明",
+        "line_from": 7,
+        "line_to": 16,
+        "score": 5.76
+      }
+    ]
+  },
+  "code": {
+    "items": [
+      {
+        "path": "business/reading_list/service.py",
+        "symbol": "ReadingListService.list_items",
+        "line_from": 57,
+        "line_to": 87,
+        "source": "retrieval"
+      }
+    ]
+  },
+  "tests": {
+    "target": ["business/tests/test_filter_feature.py"],
+    "regression": ["business/tests/test_regression_baseline.py", "business/tests/test_http_api.py"],
+    "items": []
+  },
+  "progress": {
+    "source": "PowerContext",
+    "events": 6,
+    "verified": true,
+    "patch_applied": true,
+    "attempts": 2
+  }
+}

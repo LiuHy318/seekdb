@@ -1,0 +1,21 @@
+{
+  "stage": "verify",
+  "ok": true,
+  "target": {
+    "name": "target",
+    "exit_code": 0,
+    "passed": 14,
+    "failed": 0,
+    "errors": 0,
+    "summary": "14 passed in 0.32s"
+  },
+  "regression": {
+    "name": "regression",
+    "exit_code": 0,
+    "passed": 20,
+    "failed": 0,
+    "errors": 0,
+    "summary": "20 passed in 0.45s"
+  },
+  "fallback_used": false
+}

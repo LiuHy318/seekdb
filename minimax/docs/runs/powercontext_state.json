@@ -1,0 +1,28 @@
+{
+  "scope_id": "mm-sdd-task-001",
+  "events": [
+    {"seq": 1, "event": "task_started", "at": "2026-11-09T18:27:00+0800", "task_id": "TASK-001"},
+    {"seq": 2, "event": "context_built", "at": "2026-11-09T18:27:50+0800", "task_id": "TASK-001", "spec_items": 6, "code_items": 8},
+    {"seq": 3, "event": "patch_generated", "at": "2026-11-09T18:28:15+0800", "task_id": "TASK-001", "attempt": 1, "model": "MiniMax-M3.1-Flash"},
+    {"seq": 4, "event": "patch_applied", "at": "2026-11-09T18:28:30+0800", "task_id": "TASK-001", "changed_files": ["business/reading_list/service.py"]},
+    {"seq": 5, "event": "tests_run", "at": "2026-11-09T18:28:45+0800", "task_id": "TASK-001", "target_ok": true, "regression_ok": true},
+    {"seq": 6, "event": "verified", "at": "2026-11-09T18:28:45+0800", "task_id": "TASK-001", "ok": true}
+  ],
+  "progress": {
+    "task_id": "TASK-001",
+    "started": true,
+    "context_built": true,
+    "patch_generated": true,
+    "patch_applied": true,
+    "verified": true,
+    "attempts": 1,
+    "history": [
+      {"seq": 1, "event": "task_started", "at": "2026-11-09T18:27:00+0800"},
+      {"seq": 2, "event": "context_built", "at": "2026-11-09T18:27:50+0800"},
+      {"seq": 3, "event": "patch_generated", "at": "2026-11-09T18:28:15+0800"},
+      {"seq": 4, "event": "patch_applied", "at": "2026-11-09T18:28:30+0800"},
+      {"seq": 5, "event": "tests_run", "at": "2026-11-09T18:28:45+0800"},
+      {"seq": 6, "event": "verified", "at": "2026-11-09T18:28:45+0800"}
+    ]
+  }
+}

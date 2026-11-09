@@ -1,0 +1,59 @@
+--- a/business/reading_list/service.py
++++ b/business/reading_list/service.py
+@@ -1,5 +1,5 @@
+ """列表查询服务：排序、分页与筛选（SPEC-001 已实现）。"""
+
+-from __future__ import annotations
+
+ from collections.abc import Iterable
+
+ from reading_list.models import Page, ReadingItem, Status
+@@ -15,6 +15,23 @@ def _validate_page(page: int, page_size: int, sort: str) -> None:
+         raise ValueError(f"sort must be one of {SORT_MODES}")
+
+
++def _resolve_status(status: Status | str | None) -> Status | None:
++    if status is None:
++        return None
++    if isinstance(status, Status):
++        return status
++    if isinstance(status, str):
++        try:
++            return Status(status)
++        except ValueError:
++            raise ValueError(f"invalid status: {status!r}") from None
++    raise ValueError(f"status must be Status or str, got {type(status).__name__}")
++
++
++def _validate_min_rating(min_rating: int | None) -> None:
++    if min_rating is None:
++        return
++    if not isinstance(min_rating, int) or isinstance(min_rating, bool):
++        raise ValueError("min_rating must be an integer")
++    if min_rating < 1 or min_rating > 5:
++        raise ValueError(f"min_rating must be within 1..5, got {min_rating}")
++
++
+ def _sort_key(sort: str):
+     if sort == "added_at_asc":
+         return lambda item: (item.added_at, item.id)
+@@ -68,9 +85,14 @@ class ReadingListService:
+     ) -> Page:
+         _validate_page(page, page_size, sort)
+-
+-        # TODO(SPEC-001): status / min_rating 过滤尚未实现，参数暂时被忽略。
+-        selected: list[ReadingItem] = list(self._items)
++        resolved_status = _resolve_status(status)
++        _validate_min_rating(min_rating)
++
++        selected: list[ReadingItem] = list(self._items)
++
++        if resolved_status is not None:
++            selected = [item for item in selected if item.status == resolved_status]
++
++        if min_rating is not None:
++            selected = [item for item in selected if item.rating is not None and item.rating >= min_rating]
++
+         ordered = sorted(selected, key=_sort_key(sort))
+         total = len(ordered)
+         total_pages = (total + page_size - 1) // page_size
