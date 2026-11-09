@@ -645,6 +645,7 @@ cc_library(
     hdrs = [
         "lib/vector/ob_vector_util.h",
         "lib/vector/ob_vsag_adaptor.h",
+        "lib/vector/ob_hipvs_builder.h",
     ],
     deps = [
         ":oblib_base",

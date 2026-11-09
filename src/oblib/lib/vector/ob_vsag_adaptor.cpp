@@ -17,7 +17,12 @@
 #define USING_LOG_PREFIX LIB
 
 #include "ob_vsag_adaptor.h"
+#include "ob_hipvs_builder.h"
 #include <map>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <filesystem>
 #include "vsag/vsag.h"
 #include "vsag/errors.h"
 #include "vsag/dataset.h"
@@ -965,16 +970,82 @@ int build_index(VectorIndexPtr &index_handler, float *vector_list,
     ret = OB_INVALID_ARGUMENT;
   } else {
     HnswIndexHandler *hnsw = static_cast<HnswIndexHandler *>(index_handler);
-    DatasetPtr dataset = vsag::Dataset::Make();
-    dataset->Dim(dim)
-        ->NumElements(size)
-        ->Ids(ids)
-        ->Float32Vectors(vector_list)
-        ->Owner(false);
-    if (extra_infos != nullptr) {
-      dataset->ExtraInfos(extra_infos);
+
+    // Try GPU-accelerated build via hipVS (AMD ROCm)
+    // Uses CAGRA on GPU to build the base graph, then converts to HNSW
+    // with CPU hierarchy (compatible with hnswlib format)
+    bool gpu_build_succeeded = false;
+    if (obvsag::hipvs_is_available() && hnsw->get_index_type() == HNSW_TYPE) {
+      LOG_INFO("[OBVSAG] hipVS available, trying GPU-accelerated HNSW build",
+               K(dim), K(size), K(hnsw->get_max_degree()), K(hnsw->get_ef_construction()), K(lbt()));
+
+      // Prepare hipVS build params
+      obvsag::HipvsBuildParams params;
+      params.dim = dim;
+      params.num_vectors = size;
+      params.max_degree = hnsw->get_max_degree();
+      params.ef_construction = hnsw->get_ef_construction();
+      params.metric = (strcmp(hnsw->get_metric(), "l2") == 0) ? obvsag::HIPVS_METRIC_L2
+                    : (strcmp(hnsw->get_metric(), "ip") == 0) ? obvsag::HIPVS_METRIC_INNER_PRODUCT
+                    : obvsag::HIPVS_METRIC_COSINE;
+
+      // Create temp directory for hipVS-built index
+      std::error_code ec;
+      std::string tmp_dir = (std::filesystem::temp_directory_path(ec) / "seekdb_hipvs_hnsw_" 
+                            + std::to_string(::getpid())).string();
+      if (ec) {
+        tmp_dir = "/tmp/seekdb_hipvs_hnsw_" + std::to_string(::getpid());
+      }
+      std::filesystem::create_directories(tmp_dir, ec);
+      std::string tmp_file = tmp_dir + "/index.bin";
+
+      int hipvs_ret = obvsag::hipvs_build_hnsw_gpu(vector_list, ids, params, tmp_file);
+      if (hipvs_ret == 0 && std::filesystem::exists(tmp_file, ec)) {
+        LOG_INFO("[OBVSAG] hipVS GPU build completed, loading into vsag", K(lbt()));
+
+        // Read the hipVS-built index file into a stream for vsag deserialization
+        std::ifstream in_stream(tmp_file, std::ios::binary);
+        if (in_stream.is_open()) {
+          // Use vsag's fdeserialize to load the index
+          // This replaces the internal vsag::Index with the GPU-built one
+          VectorIndexPtr tmp_handler = index_handler;
+          ret = fdeserialize(tmp_handler, in_stream);
+          in_stream.close();
+
+          if (OB_SUCC(ret)) {
+            LOG_INFO("[OBVSAG] GPU-accelerated HNSW build succeeded via hipVS",
+                     K(size), K(dim), K(lbt()));
+            gpu_build_succeeded = true;
+          } else {
+            LOG_WARN("[OBVSAG] Failed to deserialize hipVS-built index, falling back to CPU build",
+                     K(ret), K(lbt()));
+          }
+        } else {
+          LOG_WARN("[OBVSAG] Cannot open hipVS index file for deserialization", K(tmp_file));
+        }
+
+        // Cleanup temp files
+        std::filesystem::remove_all(tmp_dir, ec);
+      } else {
+        LOG_WARN("[OBVSAG] hipVS GPU build failed, falling back to CPU build",
+                 K(hipvs_ret), KCSTRING(obvsag::hipvs_last_error()));
+      }
     }
-    if (OB_FAIL(hnsw->build_index(dataset))) {
+
+    // Fallback to CPU build if GPU path failed or not available
+    if (!gpu_build_succeeded) {
+      DatasetPtr dataset = vsag::Dataset::Make();
+      dataset->Dim(dim)
+          ->NumElements(size)
+          ->Ids(ids)
+          ->Float32Vectors(vector_list)
+          ->Owner(false);
+      if (extra_infos != nullptr) {
+        dataset->ExtraInfos(extra_infos);
+      }
+      if (OB_FAIL(hnsw->build_index(dataset))) {
+        LOG_WARN("[OBVSAG] CPU HNSW build failed", K(ret), K(lbt()));
+      }
     }
   }
   return ret;
