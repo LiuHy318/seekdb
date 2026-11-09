@@ -218,7 +218,11 @@ int ObSRTaaTIterImpl::init_chunk_stores()
         ret = OB_ALLOCATE_MEMORY_FAILED;
       } else {
         ObSRTaaTHashMap *hash_map = new (buf) ObSRTaaTHashMap();
-        if (OB_FAIL(hash_map->create(10, common::ObMemAttr("FTTaatMap")))) {
+        // Each partition holds roughly total_doc_cnt/partition_cnt docs (up to
+        // ~20k for 8c/16g sized datasets). Starting from 10 buckets forces
+        // dozens of hash-table resizes while filling a partition; pre-size
+        // to amortize that cost.
+        if (OB_FAIL(hash_map->create(8192, common::ObMemAttr("FTTaatMap")))) {
         } else {
           hash_maps_[i] = hash_map;
         }
