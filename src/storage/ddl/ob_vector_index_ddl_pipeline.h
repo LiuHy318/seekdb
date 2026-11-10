@@ -25,6 +25,7 @@
 #include "query/vector/ob_vector_embedding_handler.h"
 #include "storage/ddl/ob_hnsw_embedmgr.h"
 #include "lib/lock/ob_spin_lock.h"
+#include <vector>
 
 namespace oceanbase
 {
@@ -299,7 +300,19 @@ private:
       const common::ObIArray<common::ObIVector *> &vectors,
       ObDDLTabletContext *tablet_context);
   int append_row_file(ObDDLRowFile *row_file, ObDDLTabletContext *tablet_context);
+  // Flush the rows accumulated by append_row() to the vector-index snapshot in
+  // one adaptor call. Both the GPU (lib=cuvs) and the CPU (lib=vsag) backends
+  // accept batched vectors, so this removes the per-row adapter lookup, lock,
+  // and tiny append that dominate the offline-DDL append stage.
+  int flush_pending_batch(ObDDLTabletContext *tablet_context);
 private:
+  // Batch limits: at most HNSW_APPEND_BATCH_MAX_ROWS rows, and at most
+  // HNSW_APPEND_BATCH_MAX_FLOATS floats (~1 MB) so wide vectors cannot inflate
+  // the per-slice append buffer.
+  static const int64_t HNSW_APPEND_BATCH_MAX_ROWS = 1024;
+  static const int64_t HNSW_APPEND_BATCH_MAX_FLOATS = 256LL * 1024;
+  std::vector<float> batch_vectors_;
+  std::vector<int64_t> batch_vids_;
   int64_t vec_dim_;
   common::ObString vec_idx_param_;
   int32_t vector_vid_col_idx_;
