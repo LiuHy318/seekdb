@@ -98,7 +98,12 @@ int ObTextWhitespaceTokenizer::get_next(ObDatum &next_token, int64_t &token_freq
     int64_t token_len = 0;
     // to next non-whitespace pos
     while (OB_SUCC(ret) && found_delimiter()) {
-      const int64_t c_len = ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
+      const char c = doc[trav_pos_];
+      // In UTF8MB4 any byte < 0x80 is a single-byte ASCII char; skip the
+      // charset-aware length lookup on the hot scanning path.
+      const int64_t c_len = (static_cast<unsigned char>(c) < 0x80)
+                                ? 1
+                                : ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
       trav_pos_ += c_len;
       if (trav_pos_ >= doc_len || 0 == c_len) {// if char is invalid, just skip the rest of document
         iter_end_ = true;
@@ -112,7 +117,12 @@ int ObTextWhitespaceTokenizer::get_next(ObDatum &next_token, int64_t &token_freq
 
     // to next whitespace pos
     while (OB_SUCC(ret) && !found_delimiter()) {
-      const int64_t c_len = ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
+      const char c = doc[trav_pos_];
+      // In UTF8MB4 any byte < 0x80 is a single-byte ASCII char; skip the
+      // charset-aware length lookup on the hot scanning path.
+      const int64_t c_len = (static_cast<unsigned char>(c) < 0x80)
+                                ? 1
+                                : ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
       trav_pos_ += c_len;
       token_len += c_len;
       if (trav_pos_ >= doc_len || 0 == c_len) {
