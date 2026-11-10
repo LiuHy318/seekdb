@@ -101,7 +101,8 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
   dset.dl_tensor.shape = ds; dset.dl_tensor.strides = 0; dset.dl_tensor.byte_offset = 0;
 
   if (cuvsCagraIndexParamsCreate(&h->ip) != CUVS_SUCCESS) goto fail_res;
-  h->ip->build_algo = sk_build_algo();
+  /* Explicit cast keeps this file valid whether hipcc compiles it as C or C++. */
+  h->ip->build_algo = (enum cuvsCagraGraphBuildAlgo)sk_build_algo();
   h->ip->graph_degree = sk_env_int("SEEKDB_CUVS_GRAPH_DEGREE", SK_CUVS_DEFAULT_GRAPH_DEGREE, 1);
   h->ip->intermediate_graph_degree =
       sk_env_int("SEEKDB_CUVS_INTERMEDIATE_DEGREE", SK_CUVS_DEFAULT_INTERMEDIATE_DEGREE, 1);
