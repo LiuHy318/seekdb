@@ -226,8 +226,8 @@ static bool load_hipvs_library() {
   return true;
 }
 
-int hipvs_init() {
-  std::lock_guard<std::mutex> lock(hipvs_init_mutex_);
+// Internal: must be called with hipvs_init_mutex_ already held.
+static int hipvs_init_locked() {
   if (hipvs_checked_) {
     return hipvs_available_ ? 0 : -1;
   }
@@ -251,10 +251,15 @@ int hipvs_init() {
   return 0;
 }
 
+int hipvs_init() {
+  std::lock_guard<std::mutex> lock(hipvs_init_mutex_);
+  return hipvs_init_locked();
+}
+
 bool hipvs_is_available() {
   std::lock_guard<std::mutex> lock(hipvs_init_mutex_);
   if (!hipvs_checked_) {
-    hipvs_init();
+    hipvs_init_locked();
   }
   return hipvs_available_;
 }
@@ -296,8 +301,10 @@ int hipvs_build_hnsw_gpu(
   cuvsHnswIndexParams_t hnsw_params = nullptr;
   cuvsHnswIndex_t hnsw_index = nullptr;
 
-  // DLTensor shape (must outlive the build call)
+  // DLTensor shape and strides (must outlive the build call).
+  // Row-major (C-contiguous): stride[0] = dim, stride[1] = 1.
   int64_t shape[2] = {params.num_vectors, params.dim};
+  int64_t strides[2] = {params.dim, 1};
 
   do {
     // 1. Resources
@@ -338,7 +345,7 @@ int hipvs_build_hnsw_gpu(
     dataset.dl_tensor.dtype.bits = 32;
     dataset.dl_tensor.dtype.lanes = 1;
     dataset.dl_tensor.shape = shape;
-    dataset.dl_tensor.strides = nullptr;
+    dataset.dl_tensor.strides = strides;
     dataset.dl_tensor.byte_offset = 0;
     dataset.manager_ctx = nullptr;
     dataset.deleter = nullptr;
