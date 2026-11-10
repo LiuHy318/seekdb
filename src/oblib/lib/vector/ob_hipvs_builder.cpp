@@ -21,36 +21,110 @@
 #include <mutex>
 #include <dlfcn.h>
 
-// hipVS C API function pointer types
-// We use dynamic linking to gracefully handle environments without ROCm
-extern "C" {
+// ============================================================================
+// Dynamic bindings to the AMD ROCm hipVS (cuVS-compatible) C API.
+//
+// The hipVS C shared library ships as `libcuvs_c.so` on ROCm systems. We load
+// it with dlopen(3) so that seekdb builds and runs unchanged on machines
+// without an AMD GPU / ROCm stack: every GPU call degrades gracefully to the
+// CPU build path in the caller.
+//
+// Pipeline used to accelerate HNSW index build:
+//   1. cuvsCagraBuild        - GPU builds the KNN (level-0) graph (CAGRA)
+//   2. cuvsHnswFromCagra     - CPU builds the upper HNSW hierarchy on top of
+//                               the GPU graph (hierarchy = CPU), producing an
+//                               hnswlib-compatible index
+//   3. cuvsHnswSerialize     - writes the index in hnswlib binary format,
+//                               which the caller (vsag) loads back
+// ============================================================================
 
+// ---- Opaque handle types (mirror cuVS c_api.h) ---------------------------
 typedef void* cuvsResources_t;
 typedef void* cuvsCagraIndexParams_t;
 typedef void* cuvsCagraIndex_t;
 typedef void* cuvsHnswIndexParams_t;
 typedef void* cuvsHnswIndex_t;
 
+// cuvsError_t
 typedef enum {
-  HIPVS_CUVS_DIST_L2 = 0,
-  HIPVS_CUVS_DIST_INNER_PRODUCT = 1,
-  HIPVS_CUVS_DIST_COSINE = 2,
+  HIPVS_CUVS_ERROR = 0,
+  HIPVS_CUVS_SUCCESS = 1,
+} hipvs_cuvs_error_t;
+
+// cuvsDistanceType (from cuvs/distance/distance.h)
+typedef enum {
+  HIPVS_DIST_L2 = 0,            // L2Expanded
+  HIPVS_DIST_COSINE = 2,        // CosineExpanded
+  HIPVS_DIST_INNER_PRODUCT = 6, // InnerProduct
 } hipvs_cuvs_distance_type_t;
 
+// cuvsCagraGraphBuildAlgo
+typedef enum {
+  HIPVS_CAGRA_AUTO_SELECT = 0,
+  HIPVS_CAGRA_IVF_PQ = 1,
+  HIPVS_CAGRA_NN_DESCENT = 2,
+} hipvs_cagra_graph_build_algo_t;
+
+// cuvsHnswHierarchy
 typedef enum {
   HIPVS_HNSW_HIERARCHY_NONE = 0,
   HIPVS_HNSW_HIERARCHY_CPU = 1,
   HIPVS_HNSW_HIERARCHY_GPU = 2,
 } hipvs_hnsw_hierarchy_t;
 
-// DLManagedTensor structure (subset)
+// ---- DLPack DLTensor (subset, enough for CPU float32 2-D tensors) --------
+//
+// We lay out the structs exactly as DLPack defines them so the ABI matches
+// what libcuvs_c.so expects.
+typedef enum {
+  HIPVS_KDLCPU = 1,
+} hipvs_dl_device_type_t;
+
 typedef struct {
-  int64_t shape[2];
+  int32_t device_type;
+  int32_t device_id;
+} hipvs_dl_device_t;
+
+typedef struct {
+  uint8_t code;    // kDLFloat = 0
+  uint8_t bits;    // 32
+  uint16_t lanes;  // 1
+} hipvs_dl_dtype_t;
+
+typedef struct {
+  void* data;
+  hipvs_dl_device_t device;
   int32_t ndim;
-  const char* data;
-  // We don't need the full structure for our use case
+  hipvs_dl_dtype_t dtype;
+  int64_t* shape;
+  int64_t* strides;
+  uint64_t byte_offset;
 } hipvs_dl_tensor_t;
 
+typedef struct {
+  hipvs_dl_tensor_t dl_tensor;
+  void* manager_ctx;
+  void (*deleter)(void*);
+} hipvs_dl_managed_tensor_t;
+
+// ---- Real parameter struct layouts (needed to set fields after Create) ----
+typedef struct {
+  hipvs_cuvs_distance_type_t metric;
+  size_t intermediate_graph_degree;
+  size_t graph_degree;
+  hipvs_cagra_graph_build_algo_t build_algo;
+  size_t nn_descent_niter;
+  void* compression;        // cuvsCagraCompressionParams_t
+  void* graph_build_params;  // cuvsIvfPqParams_t
+} hipvs_cagra_index_params_s;
+
+typedef struct {
+  hipvs_hnsw_hierarchy_t hierarchy;
+  int ef_construction;
+  int num_threads;
+} hipvs_hnsw_index_params_s;
+
+// ---- Function pointer types ----------------------------------------------
 typedef int (*cuvsResourcesCreate_fn)(cuvsResources_t*);
 typedef int (*cuvsResourcesDestroy_fn)(cuvsResources_t);
 typedef int (*cuvsCagraIndexParamsCreate_fn)(cuvsCagraIndexParams_t*);
@@ -58,16 +132,14 @@ typedef int (*cuvsCagraIndexParamsDestroy_fn)(cuvsCagraIndexParams_t);
 typedef int (*cuvsCagraIndexCreate_fn)(cuvsCagraIndex_t*);
 typedef int (*cuvsCagraIndexDestroy_fn)(cuvsCagraIndex_t);
 typedef int (*cuvsCagraBuild_fn)(cuvsResources_t, cuvsCagraIndexParams_t,
-                                  hipvs_dl_tensor_t*, cuvsCagraIndex_t);
+                                 hipvs_dl_managed_tensor_t*, cuvsCagraIndex_t);
 typedef int (*cuvsHnswIndexParamsCreate_fn)(cuvsHnswIndexParams_t*);
 typedef int (*cuvsHnswIndexParamsDestroy_fn)(cuvsHnswIndexParams_t);
 typedef int (*cuvsHnswIndexCreate_fn)(cuvsHnswIndex_t*);
 typedef int (*cuvsHnswIndexDestroy_fn)(cuvsHnswIndex_t);
 typedef int (*cuvsHnswFromCagra_fn)(cuvsResources_t, cuvsHnswIndexParams_t,
-                                     cuvsCagraIndex_t, cuvsHnswIndex_t);
+                                    cuvsCagraIndex_t, cuvsHnswIndex_t);
 typedef int (*cuvsHnswSerialize_fn)(cuvsResources_t, const char*, cuvsHnswIndex_t);
-
-}  // extern "C"
 
 namespace oceanbase {
 namespace common {
@@ -77,8 +149,9 @@ static void* hipvs_lib_handle_ = nullptr;
 static bool hipvs_checked_ = false;
 static bool hipvs_available_ = false;
 static std::string hipvs_error_msg_;
+static std::mutex hipvs_init_mutex_;
 
-// Function pointers
+// Loaded function pointers
 static cuvsResourcesCreate_fn p_cuvsResourcesCreate = nullptr;
 static cuvsResourcesDestroy_fn p_cuvsResourcesDestroy = nullptr;
 static cuvsCagraIndexParamsCreate_fn p_cuvsCagraIndexParamsCreate = nullptr;
@@ -93,44 +166,51 @@ static cuvsHnswIndexDestroy_fn p_cuvsHnswIndexDestroy = nullptr;
 static cuvsHnswFromCagra_fn p_cuvsHnswFromCagra = nullptr;
 static cuvsHnswSerialize_fn p_cuvsHnswSerialize = nullptr;
 
-static std::mutex hipvs_init_mutex_;
-
-bool hipvs_is_available() {
-  std::lock_guard<std::mutex> lock(hipvs_init_mutex_);
-  if (!hipvs_checked_) {
-    hipvs_init();
-  }
-  return hipvs_available_;
-}
-
 static bool load_hipvs_library() {
   if (hipvs_lib_handle_ != nullptr) {
     return true;
   }
 
-  // Try to load libhipvs_c.so (ROCm hipVS C API library)
-  hipvs_lib_handle_ = dlopen("libhipvs_c.so", RTLD_LAZY | RTLD_GLOBAL);
+  // hipVS ships the C API as libcuvs_c.so. Try a few candidate names so we
+  // tolerate minor packaging differences across ROCm releases.
+  static const char* const candidate_names[] = {
+      "libcuvs_c.so",
+      "libhipvs_c.so",
+      "libcuvs_c.so.1",
+  };
+
+  for (const char* name : candidate_names) {
+    hipvs_lib_handle_ = dlopen(name, RTLD_LAZY | RTLD_GLOBAL);
+    if (hipvs_lib_handle_ != nullptr) {
+      break;
+    }
+  }
   if (hipvs_lib_handle_ == nullptr) {
-    hipvs_error_msg_ = "Failed to load libhipvs_c.so: " + std::string(dlerror());
+    hipvs_error_msg_ = "dlopen cuvs/hipvs C library failed: " +
+                       std::string(dlerror());
     return false;
   }
 
-  // Load function pointers
-  p_cuvsResourcesCreate = (cuvsResourcesCreate_fn)dlsym(hipvs_lib_handle_, "cuvsResourcesCreate");
-  p_cuvsResourcesDestroy = (cuvsResourcesDestroy_fn)dlsym(hipvs_lib_handle_, "cuvsResourcesDestroy");
-  p_cuvsCagraIndexParamsCreate = (cuvsCagraIndexParamsCreate_fn)dlsym(hipvs_lib_handle_, "cuvsCagraIndexParamsCreate");
-  p_cuvsCagraIndexParamsDestroy = (cuvsCagraIndexParamsDestroy_fn)dlsym(hipvs_lib_handle_, "cuvsCagraIndexParamsDestroy");
-  p_cuvsCagraIndexCreate = (cuvsCagraIndexCreate_fn)dlsym(hipvs_lib_handle_, "cuvsCagraIndexCreate");
-  p_cuvsCagraIndexDestroy = (cuvsCagraIndexDestroy_fn)dlsym(hipvs_lib_handle_, "cuvsCagraIndexDestroy");
-  p_cuvsCagraBuild = (cuvsCagraBuild_fn)dlsym(hipvs_lib_handle_, "cuvsCagraBuild");
-  p_cuvsHnswIndexParamsCreate = (cuvsHnswIndexParamsCreate_fn)dlsym(hipvs_lib_handle_, "cuvsHnswIndexParamsCreate");
-  p_cuvsHnswIndexParamsDestroy = (cuvsHnswIndexParamsDestroy_fn)dlsym(hipvs_lib_handle_, "cuvsHnswIndexParamsDestroy");
-  p_cuvsHnswIndexCreate = (cuvsHnswIndexCreate_fn)dlsym(hipvs_lib_handle_, "cuvsHnswIndexCreate");
-  p_cuvsHnswIndexDestroy = (cuvsHnswIndexDestroy_fn)dlsym(hipvs_lib_handle_, "cuvsHnswIndexDestroy");
-  p_cuvsHnswFromCagra = (cuvsHnswFromCagra_fn)dlsym(hipvs_lib_handle_, "cuvsHnswFromCagra");
-  p_cuvsHnswSerialize = (cuvsHnswSerialize_fn)dlsym(hipvs_lib_handle_, "cuvsHnswSerialize");
+  // Resolve every required symbol.
+  #define RESOLVE(sym) \
+    p_##sym = (sym##_fn)dlsym(hipvs_lib_handle_, #sym);
 
-  // Check if all required functions are loaded
+  RESOLVE(cuvsResourcesCreate)
+  RESOLVE(cuvsResourcesDestroy)
+  RESOLVE(cuvsCagraIndexParamsCreate)
+  RESOLVE(cuvsCagraIndexParamsDestroy)
+  RESOLVE(cuvsCagraIndexCreate)
+  RESOLVE(cuvsCagraIndexDestroy)
+  RESOLVE(cuvsCagraBuild)
+  RESOLVE(cuvsHnswIndexParamsCreate)
+  RESOLVE(cuvsHnswIndexParamsDestroy)
+  RESOLVE(cuvsHnswIndexCreate)
+  RESOLVE(cuvsHnswIndexDestroy)
+  RESOLVE(cuvsHnswFromCagra)
+  RESOLVE(cuvsHnswSerialize)
+  #undef RESOLVE
+
+  // Verify all symbols resolved.
   if (!p_cuvsResourcesCreate || !p_cuvsResourcesDestroy ||
       !p_cuvsCagraIndexParamsCreate || !p_cuvsCagraIndexParamsDestroy ||
       !p_cuvsCagraIndexCreate || !p_cuvsCagraIndexDestroy ||
@@ -138,22 +218,19 @@ static bool load_hipvs_library() {
       !p_cuvsHnswIndexParamsCreate || !p_cuvsHnswIndexParamsDestroy ||
       !p_cuvsHnswIndexCreate || !p_cuvsHnswIndexDestroy ||
       !p_cuvsHnswFromCagra || !p_cuvsHnswSerialize) {
-    hipvs_error_msg_ = "Failed to load required hipVS functions";
+    hipvs_error_msg_ = "failed to resolve required cuvs C API symbols";
     dlclose(hipvs_lib_handle_);
     hipvs_lib_handle_ = nullptr;
     return false;
   }
-
   return true;
 }
 
 int hipvs_init() {
   std::lock_guard<std::mutex> lock(hipvs_init_mutex_);
-
   if (hipvs_checked_) {
     return hipvs_available_ ? 0 : -1;
   }
-
   hipvs_checked_ = true;
 
   if (!load_hipvs_library()) {
@@ -161,18 +238,25 @@ int hipvs_init() {
     return -1;
   }
 
-  // Try creating resources to verify GPU availability
+  // Probe GPU availability by creating and immediately destroying resources.
   cuvsResources_t res = nullptr;
   int ret = p_cuvsResourcesCreate(&res);
-  if (ret != 0 || res == nullptr) {
-    hipvs_error_msg_ = "Failed to create cuvs resources (no AMD GPU?)";
+  if (ret != (int)HIPVS_CUVS_SUCCESS || res == nullptr) {
+    hipvs_error_msg_ = "cuvsResourcesCreate failed (no AMD ROCm GPU?)";
     hipvs_available_ = false;
     return -1;
   }
-
   p_cuvsResourcesDestroy(res);
   hipvs_available_ = true;
   return 0;
+}
+
+bool hipvs_is_available() {
+  std::lock_guard<std::mutex> lock(hipvs_init_mutex_);
+  if (!hipvs_checked_) {
+    hipvs_init();
+  }
+  return hipvs_available_;
 }
 
 void hipvs_destroy() {
@@ -185,90 +269,123 @@ void hipvs_destroy() {
   hipvs_checked_ = false;
 }
 
+static hipvs_cuvs_distance_type_t map_metric(HipvsMetricType m) {
+  switch (m) {
+    case HIPVS_METRIC_INNER_PRODUCT: return HIPVS_DIST_INNER_PRODUCT;
+    case HIPVS_METRIC_COSINE:        return HIPVS_DIST_COSINE;
+    case HIPVS_METRIC_L2:
+    default:                         return HIPVS_DIST_L2;
+  }
+}
+
 int hipvs_build_hnsw_gpu(
     const float* vectors,
-    const int64_t* ids,
+    const int64_t* /*ids*/,
     const HipvsBuildParams& params,
     const std::string& output_file) {
 
-  if (!hipvs_available_) {
+  if (!hipvs_available_ || vectors == nullptr || params.dim <= 0 ||
+      params.num_vectors <= 0) {
     return -1;
   }
 
-  int ret = 0;
+  int ret = -1;
   cuvsResources_t res = nullptr;
   cuvsCagraIndexParams_t cagra_params = nullptr;
   cuvsCagraIndex_t cagra_index = nullptr;
   cuvsHnswIndexParams_t hnsw_params = nullptr;
   cuvsHnswIndex_t hnsw_index = nullptr;
 
+  // DLTensor shape (must outlive the build call)
+  int64_t shape[2] = {params.num_vectors, params.dim};
+
   do {
-    // 1. Create resources
-    ret = p_cuvsResourcesCreate(&res);
-    if (ret != 0) {
+    // 1. Resources
+    if (p_cuvsResourcesCreate(&res) != HIPVS_CUVS_SUCCESS) {
       hipvs_error_msg_ = "cuvsResourcesCreate failed";
       break;
     }
 
-    // 2. Create CAGRA build params
-    ret = p_cuvsCagraIndexParamsCreate(&cagra_params);
-    if (ret != 0) {
+    // 2. CAGRA build params
+    if (p_cuvsCagraIndexParamsCreate(&cagra_params) != HIPVS_CUVS_SUCCESS) {
       hipvs_error_msg_ = "cuvsCagraIndexParamsCreate failed";
       break;
     }
+    {
+      auto* p = reinterpret_cast<hipvs_cagra_index_params_s*>(cagra_params);
+      p->metric = map_metric(params.metric);
+      // graph_degree = HNSW M; intermediate degree is typically 2*M.
+      size_t m = (params.max_degree > 0) ? (size_t)params.max_degree : 16;
+      p->graph_degree = m;
+      p->intermediate_graph_degree = 2 * m;
+      p->build_algo = HIPVS_CAGRA_AUTO_SELECT;
+      p->nn_descent_niter = 20;
+    }
 
-    // 3. Create CAGRA index
-    ret = p_cuvsCagraIndexCreate(&cagra_index);
-    if (ret != 0) {
+    // 3. CAGRA index handle
+    if (p_cuvsCagraIndexCreate(&cagra_index) != HIPVS_CUVS_SUCCESS) {
       hipvs_error_msg_ = "cuvsCagraIndexCreate failed";
       break;
     }
 
-    // 4. Prepare dataset tensor
-    // Note: DLManagedTensor layout is simplified here; in production code
-    // we would use the full DLManagedTensor structure with proper deleters
-    hipvs_dl_tensor_t dataset_tensor;
-    memset(&dataset_tensor, 0, sizeof(dataset_tensor));
-    dataset_tensor.shape[0] = params.num_vectors;
-    dataset_tensor.shape[1] = params.dim;
-    dataset_tensor.ndim = 2;
-    dataset_tensor.data = reinterpret_cast<const char*>(vectors);
+    // 4. Build the dataset tensor (CPU float32, row-major).
+    hipvs_dl_managed_tensor_t dataset{};
+    dataset.dl_tensor.data = const_cast<float*>(vectors);
+    dataset.dl_tensor.device.device_type = HIPVS_KDLCPU;
+    dataset.dl_tensor.device.device_id = 0;
+    dataset.dl_tensor.ndim = 2;
+    dataset.dl_tensor.dtype.code = 0;    // kDLFloat
+    dataset.dl_tensor.dtype.bits = 32;
+    dataset.dl_tensor.dtype.lanes = 1;
+    dataset.dl_tensor.shape = shape;
+    dataset.dl_tensor.strides = nullptr;
+    dataset.dl_tensor.byte_offset = 0;
+    dataset.manager_ctx = nullptr;
+    dataset.deleter = nullptr;
 
-    // 5. Build CAGRA index on GPU
-    ret = p_cuvsCagraBuild(res, cagra_params, &dataset_tensor, cagra_index);
-    if (ret != 0) {
+    // 5. GPU CAGRA build - this is the accelerated step.
+    if (p_cuvsCagraBuild(res, cagra_params, &dataset, cagra_index) !=
+        HIPVS_CUVS_SUCCESS) {
       hipvs_error_msg_ = "cuvsCagraBuild failed";
       break;
     }
 
-    // 6. Create HNSW params
-    ret = p_cuvsHnswIndexParamsCreate(&hnsw_params);
-    if (ret != 0) {
+    // 6. HNSW params: build the upper hierarchy on CPU so the serialized
+    //    index is hnswlib-compatible and loadable by vsag.
+    if (p_cuvsHnswIndexParamsCreate(&hnsw_params) != HIPVS_CUVS_SUCCESS) {
       hipvs_error_msg_ = "cuvsHnswIndexParamsCreate failed";
       break;
     }
+    {
+      auto* p = reinterpret_cast<hipvs_hnsw_index_params_s*>(hnsw_params);
+      p->hierarchy = HIPVS_HNSW_HIERARCHY_CPU;
+      p->ef_construction = (params.ef_construction > 0)
+                                ? params.ef_construction
+                                : 200;
+      p->num_threads = 0;  // 0 = auto
+    }
 
-    // 7. Create HNSW index
-    ret = p_cuvsHnswIndexCreate(&hnsw_index);
-    if (ret != 0) {
+    // 7. HNSW index handle
+    if (p_cuvsHnswIndexCreate(&hnsw_index) != HIPVS_CUVS_SUCCESS) {
       hipvs_error_msg_ = "cuvsHnswIndexCreate failed";
       break;
     }
 
-    // 8. Convert CAGRA to HNSW (CPU hierarchy for hnswlib compatibility)
-    ret = p_cuvsHnswFromCagra(res, hnsw_params, cagra_index, hnsw_index);
-    if (ret != 0) {
+    // 8. Convert CAGRA (GPU graph) -> HNSW (adds CPU hierarchy)
+    if (p_cuvsHnswFromCagra(res, hnsw_params, cagra_index, hnsw_index) !=
+        HIPVS_CUVS_SUCCESS) {
       hipvs_error_msg_ = "cuvsHnswFromCagra failed";
       break;
     }
 
-    // 9. Serialize HNSW index to file in hnswlib-compatible format
-    ret = p_cuvsHnswSerialize(res, output_file.c_str(), hnsw_index);
-    if (ret != 0) {
+    // 9. Serialize to hnswlib binary format.
+    if (p_cuvsHnswSerialize(res, output_file.c_str(), hnsw_index) !=
+        HIPVS_CUVS_SUCCESS) {
       hipvs_error_msg_ = "cuvsHnswSerialize failed";
       break;
     }
 
+    ret = 0;
   } while (0);
 
   // Cleanup

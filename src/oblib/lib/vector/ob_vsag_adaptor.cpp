@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <filesystem>
+#include <unistd.h>
 #include "vsag/vsag.h"
 #include "vsag/errors.h"
 #include "vsag/dataset.h"
