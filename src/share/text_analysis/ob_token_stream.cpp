@@ -98,7 +98,12 @@ int ObTextWhitespaceTokenizer::get_next(ObDatum &next_token, int64_t &token_freq
     int64_t token_len = 0;
     // to next non-whitespace pos
     while (OB_SUCC(ret) && found_delimiter()) {
-      const int64_t c_len = ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
+      const char c = doc[trav_pos_];
+      // In UTF8MB4 any byte < 0x80 is a single-byte ASCII char; skip the
+      // charset-aware length lookup on the hot scanning path.
+      const int64_t c_len = (static_cast<unsigned char>(c) < 0x80)
+                                ? 1
+                                : ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
       trav_pos_ += c_len;
       if (trav_pos_ >= doc_len || 0 == c_len) {// if char is invalid, just skip the rest of document
         iter_end_ = true;
@@ -112,7 +117,12 @@ int ObTextWhitespaceTokenizer::get_next(ObDatum &next_token, int64_t &token_freq
 
     // to next whitespace pos
     while (OB_SUCC(ret) && !found_delimiter()) {
-      const int64_t c_len = ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
+      const char c = doc[trav_pos_];
+      // In UTF8MB4 any byte < 0x80 is a single-byte ASCII char; skip the
+      // charset-aware length lookup on the hot scanning path.
+      const int64_t c_len = (static_cast<unsigned char>(c) < 0x80)
+                                ? 1
+                                : ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
       trav_pos_ += c_len;
       token_len += c_len;
       if (trav_pos_ >= doc_len || 0 == c_len) {
@@ -138,7 +148,13 @@ bool ObTextWhitespaceTokenizer::found_delimiter()
 {
   bool found = false;
   const char *curr_char = input_doc_->ptr_ + trav_pos_;
-  found = ob_isspace(cs_, *curr_char) || ob_iscntrl(cs_, *curr_char) || ob_ispunct(cs_, *curr_char);
+  // space / control / punctuation bits live in the same ctype table entry,
+  // so read the entry once instead of performing three separate lookups.
+  if (nullptr != cs_ && nullptr != cs_->ctype) {
+    const unsigned char flags =
+        (cs_->ctype + 1)[static_cast<unsigned char>(*curr_char)];
+    found = (flags & (_MY_SPC | _MY_CTR | _MY_PNT)) != 0;
+  }
   return found;
 }
 
@@ -209,8 +225,9 @@ int ObTokenStopWordNormalizer::filter_special_marks(const ObDatum &check_token, 
   const char *token = check_token.ptr_;
   int64_t special_mark_cnt = 0;
   for (int64_t i = 0; i < token_len; ++i) {
-    const char *character = token + i;
-    if (ob_ispunct(cs_, *character) || ob_iscntrl(cs_, *character)) {
+    const unsigned char flags = (nullptr != cs_ && nullptr != cs_->ctype)
+        ? (cs_->ctype + 1)[static_cast<unsigned char>(token[i])] : 0;
+    if (flags & (_MY_PNT | _MY_CTR)) {
       special_mark_cnt++;
     }
   }
