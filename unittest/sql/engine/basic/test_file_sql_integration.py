@@ -87,6 +87,32 @@ class FileSQLIntegration(unittest.TestCase):
         with self.assertRaises(pymysql.MySQLError):
             self.query(f"select * from read_csv('{self.file('records.csv')}',sample_size=1)")
 
+    def test_record_budget_covers_total_csv_row_and_jsonl(self):
+        # Each field is individually under the field limit, while the combined
+        # CSV row exceeds the record budget. Build fixtures without huge strings.
+        oversized = self.root / 'oversized.txt'
+        try:
+            with oversized.open('w') as f:
+                f.write('a,b,c\n')
+                for field in range(3):
+                    if field:
+                        f.write(',')
+                    for _ in range(6):
+                        f.write('x' * (1024 * 1024))
+                f.write('\n')
+            with self.assertRaises(pymysql.MySQLError):
+                self.query(f"select * from read_csv('{self.file('oversized.txt')}')")
+            with oversized.open('w') as f:
+                f.write('{"value":"')
+                for _ in range(18):
+                    f.write('x' * (1024 * 1024))
+                f.write('"}')
+            with self.assertRaises(pymysql.MySQLError):
+                self.query(f"select * from read_json('{self.file('oversized.txt')}')")
+            self.assertEqual(((42,),), self.query('select 42'))
+        finally:
+            oversized.unlink(missing_ok=True)
+
 
 if __name__ == '__main__':
     unittest.main()

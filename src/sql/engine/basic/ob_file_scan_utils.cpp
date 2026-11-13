@@ -331,6 +331,7 @@ int read_csv_record(std::istream &stream, std::vector<std::string> &fields, bool
   bool quoted_field = false;
   bool after_quote = false;
   bool first_char = true;
+  int64_t record_bytes = 0;
   while (OB_SUCC(ret)) {
     const int next = stream.get();
     if (std::char_traits<char>::eof() == next) {
@@ -345,11 +346,16 @@ int read_csv_record(std::istream &stream, std::vector<std::string> &fields, bool
       break;
     }
     has_record = true;
+    if (++record_bytes > MAX_FIELD_SIZE || fields.size() >= static_cast<size_t>(MAX_COLUMN_COUNT)) {
+      ret = OB_SIZE_OVERFLOW;
+      break;
+    }
     const char ch = static_cast<char>(next);
     if (in_quotes) {
       if ('"' == ch) {
         if ('"' == stream.peek()) {
           stream.get();
+          ++record_bytes;
           field.push_back('"');
         } else {
           in_quotes = false;

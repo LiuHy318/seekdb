@@ -23,7 +23,7 @@ COPY (SELECT * FROM read_csv('/allowed/data.csv'))
 `sample_size` 只接受 `-1`。扫描保留文件指纹，发生替换或修改后报错。已有 COPY 目标不会被覆盖。
 
 本次额外收紧 JSONL 的读取预算：推断和执行阶段均在读取过程中限制单行长度，避免先通过
-`std::getline` 分配整条超长记录后才检查上限。同时增加独立的原生服务器集成回归测试。
+`std::getline` 分配整条超长记录后才检查上限。CSV 同时限制整条记录及列数，避免大量短字段累积超出预算。增加独立的原生服务器集成回归测试。
 
 验证工作流：`.github/workflows/file-sql-acceptance.yml`。它从当前提交编译 seekdb，启动真实服务，
 运行官方 `file_sql_basic.test` 和新增的端到端断言；失败时保存日志，不能将未通过或未运行的步骤视为通过。
