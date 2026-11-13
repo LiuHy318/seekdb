@@ -51,8 +51,11 @@ int ObStopWordChecker::init()
     stopword_type_.set_meta(stop_meta);
     const int64_t stopword_count = sizeof(ob_stop_word_list) / sizeof(ob_stop_word_list[0]);
     for (int64_t i = 0; OB_SUCC(ret) && i < stopword_count; ++i) {
-      ObFTWord stopword(STRLEN(ob_stop_word_list[i]), ob_stop_word_list[i], stopword_type_);
+      const int64_t word_len = static_cast<int64_t>(STRLEN(ob_stop_word_list[i]));
+      ObFTWord stopword(word_len, ob_stop_word_list[i], stopword_type_);
       if (OB_FAIL(stopword_set_.set_refactored(stopword))) {
+      } else if (word_len > max_word_len_) {
+        max_word_len_ = word_len;
       }
     }
 
@@ -74,25 +77,38 @@ void ObStopWordChecker::destroy()
 int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
 {
   int ret = OB_SUCCESS;
+  is_stopword = false;
 
-
-  common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
   if (OB_UNLIKELY(!inited_)) {
     ret = OB_NOT_INIT;
     LOG_WARN("ObStopWordChecker hasn't been initialized", K(ret), K(inited_));
   } else if (OB_UNLIKELY(word.empty())) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("word is empty", K(ret), K(word));
+  } else if (word.get_word().get_string().length() > max_word_len_) {
+    // No stop word is longer than the longest entry of ob_stop_word_list, so a
+    // longer word can never hit the set. Skip the conversion and the lookup.
   } else {
-    common::ObString cmp_str;
-    // do nothing set out with in if type is the same.
-    if (OB_FAIL(common::ObCharset::charset_convert(
-                                       allocator,
-                                       word.get_word().get_string(),
+    const ObString &word_str = word.get_word().get_string();
+    ObString cmp_str;
+    if (word.get_collation_type() == stopword_type_.get_collation_type()) {
+      // Same collation: no conversion is needed at all, use the word in place.
+      cmp_str = word_str;
+    } else {
+      // Reuse one thread local buffer per worker thread instead of creating an
+      // arena (and paying an allocation) for every single word.
+      thread_local common::ObArenaAllocator convert_allocator(lib::ObMemAttr("ChkStopWord"));
+      convert_allocator.reuse();
+      if (OB_FAIL(common::ObCharset::charset_convert(
+                                       convert_allocator,
+                                       word_str,
                                        word.get_collation_type(),
                                        stopword_type_.get_collation_type(),
                                        cmp_str))) {
-    } else {
+        LOG_WARN("fail to convert charset", K(ret), K(word));
+      }
+    }
+    if (OB_SUCC(ret)) {
       ObFTWord converted(cmp_str.length(), cmp_str.ptr(), stopword_type_);
       ret = stopword_set_.exist_refactored(converted);
       if (OB_HASH_NOT_EXIST == ret) {
@@ -170,20 +186,39 @@ int ObAddWord::casedown_word(const ObFTWord &src, ObFTWord &dst)
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid src ft word", K(ret), K(src));
   } else if (flag_.casedown()) {
-    ObString dst_str;
-    if (OB_FAIL(ObCharset::tolower(
-                    word_meta_.get_collation_type(),
-                    src.get_word().get_string(),
-                    dst_str,
-                    allocator_))) {
+    ObString src_str = src.get_word().get_string();
+    if (is_lower_case_ascii_word(src_str)) {
+      // Pure ASCII without any upper case character: casedown is an identity
+      // transformation, so reuse the source word and skip the copy.
+      dst = src;
     } else {
-      ObFTWord tmp(dst_str.length(), dst_str.ptr(), word_meta_);
-      dst = tmp;
+      ObString dst_str;
+      if (OB_FAIL(ObCharset::tolower(
+                      word_meta_.get_collation_type(),
+                      src_str,
+                      dst_str,
+                      allocator_))) {
+      } else {
+        ObFTWord tmp(dst_str.length(), dst_str.ptr(), word_meta_);
+        dst = tmp;
+      }
     }
   } else {
     dst = src;
   }
   return ret;
+}
+
+bool ObAddWord::is_lower_case_ascii_word(const ObString &word)
+{
+  bool result = true;
+  const char *ptr = word.ptr();
+  const int64_t len = word.length();
+  for (int64_t i = 0; i < len && result; ++i) {
+    const uint8_t c = static_cast<uint8_t>(ptr[i]);
+    result = (c < 0x80) && ('A' > c || 'Z' < c);
+  }
+  return result;
 }
 
 int ObAddWord::check_stopword(const ObFTWord &ft_word, bool &is_stopword)
@@ -213,15 +248,14 @@ int ObAddWord::groupby_word(const ObFTWord &word, const int64_t word_freq)
   } else if (!flag_.groupby_word()) {
     if (OB_FAIL(word_map_.set_refactored(word, 1/*word count*/))) {
     }
-  } else if (OB_FAIL(word_map_.get_refactored(word, word_count)) && OB_HASH_NOT_EXIST != ret) {
-    LOG_WARN("fail to get fulltext word", K(ret), K(word));
-  } else {
-    if (OB_HASH_NOT_EXIST == ret) {
-      word_count = 1;
-    } else {
-      word_count += word_freq;
-    }
-    if (OB_FAIL(word_map_.set_refactored(word, word_count, 1/*overwrite*/))) {
+  } else if (OB_FAIL(word_map_.set_refactored(word, 1/*word count*/,
+                                              0/*fail if key exists*/))) {
+    if (OB_HASH_EXIST != ret) {
+      LOG_WARN("fail to insert fulltext word", K(ret), K(word));
+    } else if (OB_FAIL(word_map_.get_refactored(word, word_count))) {
+      LOG_WARN("fail to get fulltext word", K(ret), K(word));
+    } else if (OB_FAIL(word_map_.set_refactored(word, word_count + word_freq, 1/*overwrite*/))) {
+      LOG_WARN("fail to update fulltext word count", K(ret), K(word));
     }
   }
   return ret;
