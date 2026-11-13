@@ -1,0 +1,106 @@
+name: File SQL acceptance
+
+on:
+  push:
+    branches: [feature/all-solutions]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu-build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+    steps:
+      - name: Free disk space
+        uses: insightsengineering/disk-space-reclaimer@v1
+        with:
+          tools-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+          docker-images: true
+
+      - name: Checkout verification branch
+        uses: actions/checkout@v3
+        with:
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update
+          sudo apt-get install -y git wget rpm rpm2cpio cpio make build-essential binutils m4 libtool-bin libncurses5 libaio1 python3 python3-pip
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          cache: false
+
+      - name: Initialize release build
+        shell: bash
+        run: |
+          ./build.sh release --init
+          echo "$GITHUB_WORKSPACE/deps/3rd/usr/local/oceanbase/devtools/bin" >> "$GITHUB_PATH"
+
+      - name: Build seekdb
+        shell: bash
+        run: |
+          cd build_release
+          make -j4 seekdb
+          test -x src/observer/seekdb
+
+      - name: Save seekdb runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: file-sql-seekdb
+          path: build_release/src/observer/seekdb
+          if-no-files-found: error
+          compression-level: 1
+
+      - name: Save obclient runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: file-sql-obclient
+          path: deps/3rd/u01/obclient
+          if-no-files-found: error
+          compression-level: 1
+
+
+      - name: Native server acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO_ROOT="$PWD"
+          CLIENT_ROOT="$REPO_ROOT/deps/3rd/u01/obclient"
+          export LD_LIBRARY_PATH="$CLIENT_ROOT/lib:$CLIENT_ROOT/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          BASE="$RUNNER_TEMP/file-sql-instance"
+          mkdir -p "$RUNNER_TEMP/file-sql-work/tmp" "$RUNNER_TEMP/file-sql-work/log"
+          python3 .github/script/seekdb/sdb.py start --binary "$PWD/build_release/src/observer/seekdb" --base-dir "$BASE" --port 2881
+          trap 'python3 .github/script/seekdb/sdb.py destroy --base-dir "$BASE" || true' EXIT
+          python3 .github/script/seekdb/sdb.py wait-ready --client "$CLIENT_ROOT/bin/obclient" --base-dir "$BASE" --host 127.0.0.1 --port 2881 --user root --timeout 600
+          "$CLIENT_ROOT/bin/obclient" -h127.0.0.1 -P2881 -uroot -A -Doceanbase < tools/deploy/init.sql
+          DATA_DIR="$BASE/data_for_mysqltest_file_sql"
+          mkdir -p "$DATA_DIR"
+          cp tools/deploy/mysql_test/test_suite/file_sql/data/* "$DATA_DIR/"
+          base64 -d "$DATA_DIR/simple.parquet.b64" > "$DATA_DIR/simple.parquet"
+          rm "$DATA_DIR/simple.parquet.b64"
+          export OBMYSQL_PORT=2881 OBMYSQL_MS0=127.0.0.1 OBMYSQL_MS0_DEV=127.0.0.1
+          export OBMYSQL_PWD=admin OBMYSQL_USR=admin OBSERVER_DIR="$BASE" FILE_SQL_REPO_ROOT="$REPO_ROOT"
+          export IS_BUSINESS=0 TENANT=mysql
+          (cd tools/deploy && "$CLIENT_ROOT/bin/mysqltest" --host=127.0.0.1 --port=2881 --user=admin --password=admin --database=test --tmpdir="$RUNNER_TEMP/file-sql-work/tmp" --logdir="$RUNNER_TEMP/file-sql-work/log" --silent --test-file="$REPO_ROOT/tools/deploy/mysql_test/test_suite/file_sql/t/file_sql_basic.test" --result-file="$REPO_ROOT/tools/deploy/mysql_test/test_suite/file_sql/r/mysql/file_sql_basic.result" --tail-lines=40)
+          python3 -m pip install 'pymysql==1.1.2'
+          SEEKDB_FILE_SQL_TEST_DIR="$BASE/additional" python3 unittest/sql/engine/basic/test_file_sql_integration.py
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: file-sql-failure-logs
+          path: |
+            ${{ runner.temp }}/file-sql-work/log
+            ${{ runner.temp }}/file-sql-instance/log
+          if-no-files-found: ignore

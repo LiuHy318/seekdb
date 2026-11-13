@@ -254,6 +254,30 @@ static constexpr int64_t MAX_FILE_SIZE = 1024L * 1024L * 1024L;
 static constexpr int64_t MAX_COLUMN_COUNT = 1024;
 static constexpr int64_t MAX_FIELD_SIZE = 16L * 1024L * 1024L;
 
+// Enforce the record budget while reading, before a hostile line can allocate
+// memory proportional to the whole file. Apply the same rule in both passes.
+int read_jsonl_record(std::istream &stream, std::string &line, bool &has_record)
+{
+  int ret = OB_SUCCESS;
+  line.clear();
+  has_record = false;
+  char ch = 0;
+  while (OB_SUCC(ret) && stream.get(ch)) {
+    has_record = true;
+    if ('\n' == ch) {
+      break;
+    } else if (line.size() >= static_cast<size_t>(MAX_FIELD_SIZE)) {
+      ret = OB_SIZE_OVERFLOW;
+    } else {
+      line.push_back(ch);
+    }
+  }
+  if (OB_SUCC(ret) && stream.bad()) {
+    ret = OB_IO_ERROR;
+  }
+  return ret;
+}
+
 bool ascii_iequal(const std::string &left, const char *right)
 {
   bool equal = nullptr != right && left.length() == std::strlen(right);
@@ -756,9 +780,9 @@ int infer_jsonl_schema(const std::string &path,
   if (OB_FAIL(open_safe_input_stream(path, stream_buffer, stream))) {
     LOG_WARN("failed to safely open jsonl file", K(ret));
   }
-  while (OB_SUCC(ret) && std::getline(*stream, line)) {
-    if (line.length() > static_cast<size_t>(MAX_FIELD_SIZE)) {
-      ret = OB_SIZE_OVERFLOW;
+  bool has_record = false;
+  while (OB_SUCC(ret)) {
+    if (OB_FAIL(read_jsonl_record(*stream, line, has_record)) || !has_record) {
       break;
     }
     if (!line.empty() && '\r' == line.back()) {
@@ -1281,12 +1305,12 @@ int ObFileScanReader::get_next_jsonl_row(std::vector<ObFileCell> &cells)
   int ret = OB_SUCCESS;
   std::string line;
   bool found = false;
-  while (!found && std::getline(*stream_, line)) {
-    ++current_row_number_;
-    if (line.length() > static_cast<size_t>(MAX_FIELD_SIZE)) {
-      ret = OB_SIZE_OVERFLOW;
+  bool has_record = false;
+  while (OB_SUCC(ret) && !found) {
+    if (OB_FAIL(read_jsonl_record(*stream_, line, has_record)) || !has_record) {
       break;
     }
+    ++current_row_number_;
     if (!line.empty() && '\r' == line.back()) {
       line.pop_back();
     }
