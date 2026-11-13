@@ -106,6 +106,8 @@ int TableItem::deep_copy_file_table_def(const ObFileTableDef &file_def, ObIAlloc
       LOG_WARN("failed to copy file path", K(ret));
     } else if (OB_FAIL(ob_write_string(*allocator, file_def.secure_file_priv_, file_table_def_->secure_file_priv_))) {
       LOG_WARN("failed to copy secure file privilege", K(ret));
+    } else if (OB_FAIL(ob_write_string(*allocator, file_def.csv_options_, file_table_def_->csv_options_))) {
+      LOG_WARN("failed to copy csv options", K(ret));
     } else if (OB_FAIL(ob_write_string(*allocator, file_def.pattern_, file_table_def_->pattern_))) {
       LOG_WARN("failed to copy file pattern", K(ret));
     } else {

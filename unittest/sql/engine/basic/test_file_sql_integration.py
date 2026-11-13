@@ -113,6 +113,24 @@ class FileSQLIntegration(unittest.TestCase):
         finally:
             oversized.unlink(missing_ok=True)
 
+    def test_copy_custom_csv_dialect_roundtrip_and_cache_identity(self):
+        output = self.root / 'dialect.txt'
+        output.unlink(missing_ok=True)
+        try:
+            self.query(f"copy (select id,name,NULL AS note from read_csv('{self.file('records.csv')}') order by id) "
+                       f"to '{self.file('dialect.txt')}' "
+                       "(format csv, header, delimiter ';', quote '~', escape '~', nullstr 'missing')")
+            options = "delimiter=';',quote='~',escape='~',nullstr='missing'"
+            rows = self.query(f"select id,name,note from read_csv('{self.file('dialect.txt')}',{options}) order by id")
+            self.assertEqual(((1, '中文,\"quoted\"\nline', None),
+                              (2, 'second', None), (3, 'third', None)), rows)
+            # The same file fingerprint with another NULL marker needs a distinct schema.
+            options = options.replace("'missing'", "'other'")
+            self.assertEqual(((3,),), self.query(
+                f"select count(*) from read_csv('{self.file('dialect.txt')}',{options}) where note='missing'"))
+        finally:
+            output.unlink(missing_ok=True)
+
 
 if __name__ == '__main__':
     unittest.main()

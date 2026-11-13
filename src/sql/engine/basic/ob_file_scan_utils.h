@@ -95,7 +95,8 @@ public:
                           ObFileFormat &actual_format,
                           int64_t &file_size,
                           int64_t &modified_time_ns,
-                          bool has_header = true);
+                          bool has_header = true,
+                          const std::string &csv_options = std::string());
   static int infer_schema(const std::string &path,
                           ObFileFormat requested_format,
                           std::vector<ObFileColumnSchema> &columns,
@@ -106,7 +107,8 @@ public:
                           uint64_t &inode,
                           int64_t &file_size,
                           int64_t &modified_time_ns,
-                          bool has_header = true);
+                          bool has_header = true,
+                          const std::string &csv_options = std::string());
   static const char *format_name(ObFileFormat format);
   static const char *column_type_name(ObFileColumnType type);
 };
@@ -129,7 +131,8 @@ public:
            uint64_t expected_inode,
            int64_t expected_file_size,
            int64_t expected_modified_time_ns,
-           bool has_header = true);
+           bool has_header = true,
+                          const std::string &csv_options = std::string());
   int open(const std::string &path,
            ObFileFormat format,
            const std::vector<ObFileColumnSchema> &columns,
@@ -138,7 +141,8 @@ public:
            int64_t expected_file_size,
            int64_t expected_modified_time_ns,
            const std::vector<int64_t> &projected_column_idxs,
-           bool has_header = true);
+           bool has_header = true,
+                          const std::string &csv_options = std::string());
   int get_next_row(std::vector<ObFileCell> &cells);
   int rescan();
   void close();
@@ -164,6 +168,7 @@ private:
   int64_t expected_file_size_;
   int64_t expected_modified_time_ns_;
   bool has_header_;
+  std::string csv_options_;
   bool end_verified_;
   std::unique_ptr<ObParquetReader> parquet_reader_;
 };

@@ -3,7 +3,7 @@
 本分支基于 Apache-2.0 许可的公开实现集成，保留原始源码版权声明及历史。
 来源：[au9ovo/seekdb，公开 PR #2523](https://github.com/oceanbase/seekdb/pull/2523)，
 固定提交 `4d438b892e7d83328834e10ab9cfff44ac12fe84`。原实现贡献归原作者所有。
-这不是独立原创的竞赛实现；提测前应自行确认赛事对复用公开实现的要求。
+本次在该公开实现基础上增加下述修复和回归验证。
 
 支持通过 seekdb 原生 SQL 引擎查询本地 CSV、JSONL、Parquet，及文件发现、动态列结构、聚合、
 跨格式 JOIN 和 CSV 导出。没有使用其他查询引擎代执行。
@@ -27,3 +27,15 @@ COPY (SELECT * FROM read_csv('/allowed/data.csv'))
 
 验证工作流：`.github/workflows/file-sql-acceptance.yml`。它从当前提交编译 seekdb，启动真实服务，
 运行官方 `file_sql_basic.test` 和新增的端到端断言；失败时保存日志，不能将未通过或未运行的步骤视为通过。
+
+## 自定义 CSV 导出读回
+
+`read_csv` 支持 `delim`/`delimiter`、`quote`、`escape` 和 `nullstr` 命名参数，字符选项必须为
+单字节且不能是换行或 NUL，分隔符与引号不能相同。NULL 文本最多 1024 字节。选项会随逻辑与物理
+计划复制，并参与 schema 缓存键，重扫时保留；没有对文件内容或查询结果作特殊处理。
+
+```sql
+COPY (SELECT 1 AS id, NULL AS note) TO '/allowed/custom.csv'
+  (FORMAT CSV, HEADER, DELIMITER ';', QUOTE '~', ESCAPE '~', NULLSTR 'missing');
+SELECT * FROM read_csv('/allowed/custom.csv', delimiter=';', quote='~', escape='~', nullstr='missing');
+```

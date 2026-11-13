@@ -139,6 +139,17 @@ int validate_file_scan_options(const ParseNode *node)
       if (!is_minus_one) {
         ret = OB_NOT_SUPPORTED;
       }
+    } else if (name.case_compare("delim") == 0 || name.case_compare("delimiter") == 0
+               || name.case_compare("quote") == 0 || name.case_compare("escape") == 0
+               || name.case_compare("nullstr") == 0) {
+      if (nullptr == value_node || (T_CHAR != value_node->type_ && T_VARCHAR != value_node->type_)
+          || value_node->str_len_ > 1024) {
+        ret = OB_INVALID_ARGUMENT;
+      } else if (name.case_compare("nullstr") != 0
+                 && (value_node->str_len_ != 1 || value_node->str_value_[0] == '\0'
+                     || value_node->str_value_[0] == '\n' || value_node->str_value_[0] == '\r')) {
+        ret = OB_INVALID_ARGUMENT;
+      }
     } else if (name.case_compare("format") == 0) {
       if (nullptr == value_node || (T_CHAR != value_node->type_ && T_VARCHAR != value_node->type_)) {
         ret = OB_INVALID_ARGUMENT;
@@ -180,6 +191,38 @@ int resolve_file_scan_header(const ParseNode *node, bool &has_header)
         ret = resolve_file_scan_header(node->children_[1], has_header);
       }
     }
+  }
+  return ret;
+}
+
+// Encoded as delimiter, quote, escape, followed by the NULL marker.
+// Owned strings are copied into the logical/physical plan and its schema cache key.
+int resolve_file_csv_options(const ParseNode *node, std::string &options)
+{
+  int ret = OB_SUCCESS;
+  if (nullptr == node) {
+  } else if (T_LINK_NODE != node->type_ || 2 != node->num_child_ || nullptr == node->children_) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (nullptr != node->children_[0] && T_IDENT == node->children_[0]->type_) {
+    const ParseNode *name_node = node->children_[0];
+    const ParseNode *value_node = node->children_[1];
+    const ObString name(static_cast<int32_t>(name_node->str_len_), name_node->str_value_);
+    int index = -1;
+    if (name.case_compare("delim") == 0 || name.case_compare("delimiter") == 0) index = 0;
+    else if (name.case_compare("quote") == 0) index = 1;
+    else if (name.case_compare("escape") == 0) index = 2;
+    else if (name.case_compare("nullstr") == 0) index = 3;
+    if (index >= 0) {
+      if (options.empty()) options.assign(",\"\"");
+      if (index == 3) {
+        options.erase(3);
+        options.append(value_node->str_value_, value_node->str_len_);
+      } else {
+        options[index] = value_node->str_value_[0];
+      }
+    }
+  } else if (OB_FAIL(resolve_file_csv_options(node->children_[0], options))) {
+  } else if (OB_FAIL(resolve_file_csv_options(node->children_[1], options))) {
   }
   return ret;
 }
@@ -4246,6 +4289,7 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree,
   int64_t modified_time_ns = 0;
   bool enable_file_sql = false;
   bool file_has_header = true;
+  std::string csv_options;
   const int64_t expected_child_count = T_FILE_SCAN_TABLE == parse_tree.type_ ? 4 : 2;
   const ParseNode *alias_node = nullptr;
 
@@ -4277,6 +4321,11 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree,
   } else if (T_FILE_SCAN_TABLE == parse_tree.type_
              && OB_FAIL(resolve_file_scan_header(parse_tree.children_[2], file_has_header))) {
     LOG_WARN("failed to resolve file scan header option", K(ret));
+  } else if (T_FILE_SCAN_TABLE == parse_tree.type_
+             && OB_FAIL(resolve_file_csv_options(parse_tree.children_[2], csv_options))) {
+    LOG_WARN("invalid csv options", K(ret));
+  } else if (!csv_options.empty() && csv_options[0] == csv_options[1]) {
+    ret = OB_INVALID_ARGUMENT;
   } else if (T_CHAR != parse_tree.children_[0]->type_
              && T_VARCHAR != parse_tree.children_[0]->type_) {
     ret = OB_INVALID_ARGUMENT;
@@ -4339,8 +4388,10 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree,
                                                 inode,
                                                 file_size,
                                                 modified_time_ns,
-                                                file_has_header))) {
+                                                file_has_header, csv_options))) {
         LOG_WARN("failed to infer file table schema", K(ret), K(path), K(format_name));
+      } else if (!csv_options.empty() && actual_format != ObFileFormat::CSV) {
+        ret = OB_INVALID_ARGUMENT;
       } else if (columns.empty()) {
         ret = OB_INVALID_DATA;
         LOG_WARN("file table has no columns", K(ret), K(path));
@@ -4362,7 +4413,10 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree,
     file_def->file_size_ = file_size;
     file_def->modified_time_ns_ = modified_time_ns;
     ObString canonical_path_str(static_cast<int32_t>(canonical_path.length()), canonical_path.data());
-    if (OB_FAIL(ob_write_string(*allocator_, canonical_path_str, file_def->canonical_path_))) {
+    if (OB_FAIL(ob_write_string(*allocator_, ObString(static_cast<int32_t>(csv_options.size()),
+                                                     csv_options.data()), file_def->csv_options_))) {
+      LOG_WARN("failed to store csv options", K(ret));
+    } else if (OB_FAIL(ob_write_string(*allocator_, canonical_path_str, file_def->canonical_path_))) {
       LOG_WARN("failed to copy canonical file path", K(ret));
     } else if (OB_FAIL(ob_write_string(*allocator_, secure_file_priv, file_def->secure_file_priv_))) {
       LOG_WARN("failed to copy secure file privilege", K(ret));

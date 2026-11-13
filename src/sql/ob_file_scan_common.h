@@ -75,7 +75,7 @@ struct ObFileTableDef
 {
   ObFileTableDef()
     : kind_(ObFileTableKind::INVALID), canonical_path_(), secure_file_priv_(), format_(ObFileFormat::INVALID),
-      has_header_(true), pattern_(), columns_(), source_columns_(), estimated_rows_(0), device_(0), inode_(0),
+      has_header_(true), csv_options_(), pattern_(), columns_(), source_columns_(), estimated_rows_(0), device_(0), inode_(0),
       file_size_(0), modified_time_ns_(0)
   {}
 
@@ -84,6 +84,7 @@ struct ObFileTableDef
   common::ObString secure_file_priv_;
   ObFileFormat format_;
   bool has_header_;
+  common::ObString csv_options_;
   common::ObString pattern_;
   common::ObSEArray<ObFileTableColumnDef, 16> columns_;
   common::ObSEArray<ObFileTableColumnDef, 16> source_columns_;

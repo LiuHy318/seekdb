@@ -111,7 +111,7 @@ using namespace common;
 namespace sql
 {
 OB_SERIALIZE_MEMBER((ObFileScanSpec, ObOpSpec), kind_, file_path_, secure_file_priv_, file_format_,
-                    has_header_, pattern_, device_, inode_, file_size_, modified_time_ns_,
+                    has_header_, csv_options_, pattern_, device_, inode_, file_size_, modified_time_ns_,
                     file_column_names_, file_column_types_, source_column_names_,
                     source_original_names_, source_type_names_, source_column_types_, source_column_nullable_,
                     output_column_idxs_, column_exprs_);
@@ -139,7 +139,9 @@ int ObFileScanOp::open_scan()
         std::string(file_spec().file_path_.ptr(), file_spec().file_path_.length()),
         static_cast<ObFileFormat>(file_spec().file_format_), columns,
         file_spec().device_, file_spec().inode_, file_spec().file_size_,
-        file_spec().modified_time_ns_, projected_column_idxs, file_spec().has_header_))) {
+        file_spec().modified_time_ns_, projected_column_idxs, file_spec().has_header_,
+        file_spec().csv_options_.empty() ? std::string() :
+        std::string(file_spec().csv_options_.ptr(), file_spec().csv_options_.length())))) {
     LOG_WARN("failed to open file scan reader", K(ret), K(file_spec().file_path_));
   }
   return ret;
