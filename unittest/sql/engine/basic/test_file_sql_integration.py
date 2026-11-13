@@ -149,6 +149,18 @@ class FileSQLIntegration(unittest.TestCase):
         finally:
             path.unlink(missing_ok=True)
 
+    def test_schema_name_budget(self):
+        path = self.root / 'wide-name.txt'
+        try:
+            path.write_text('x' * 1025 + '\n1\n', encoding='utf8')
+            with self.assertRaises(pymysql.MySQLError):
+                self.query(f"select * from read_csv('{self.file('wide-name.txt')}')")
+            path.write_text('{"' + 'x' * 1025 + '":1}', encoding='utf8')
+            with self.assertRaises(pymysql.MySQLError):
+                self.query(f"select * from read_json('{self.file('wide-name.txt')}')")
+        finally:
+            path.unlink(missing_ok=True)
+
 
 if __name__ == '__main__':
     unittest.main()

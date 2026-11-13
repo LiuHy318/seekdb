@@ -254,6 +254,7 @@ SchemaCache &schema_cache()
 
 static constexpr int64_t MAX_FILE_SIZE = 1024L * 1024L * 1024L;
 static constexpr int64_t MAX_COLUMN_COUNT = 1024;
+static constexpr size_t MAX_COLUMN_NAME_SIZE = 1024;
 static constexpr int64_t MAX_FIELD_SIZE = 16L * 1024L * 1024L;
 
 bool valid_csv_options(const std::string &options)
@@ -767,6 +768,10 @@ int infer_csv_schema(const std::string &path,
           && static_cast<unsigned char>(fields[i][2]) == 0xBF) {
         fields[i].erase(0, 3);
       }
+      if (fields[i].size() > MAX_COLUMN_NAME_SIZE) {
+        ret = OB_SIZE_OVERFLOW;
+        break;
+      }
       column.source_name_ = fields[i];
       column.column_name_ = make_unique_column_name(fields[i], i, columns);
       columns.push_back(column);
@@ -846,6 +851,10 @@ int infer_jsonl_schema(const std::string &path,
           }
         }
         if (column_idx < 0) {
+          if (fields[field_idx].name_.size() > MAX_COLUMN_NAME_SIZE) {
+            ret = OB_SIZE_OVERFLOW;
+            break;
+          }
           ObFileColumnSchema column;
           column.source_name_ = fields[field_idx].name_;
           column.column_name_ = make_unique_column_name(column.source_name_, columns.size(), columns);
