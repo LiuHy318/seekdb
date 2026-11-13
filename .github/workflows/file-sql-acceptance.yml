@@ -26,7 +26,6 @@ jobs:
 
       - name: Checkout verification branch
         uses: actions/checkout@v3
-        with:
 
       - name: Install build dependencies
         shell: bash
