@@ -946,7 +946,7 @@ int ObSelectIntoOp::print_field(const ObObj &obj, ObCsvFileWriter &data_writer)
   if (!has_escape_) {
     OZ(write_obj_to_file(obj, data_writer, false));
   } else if (obj.is_null()) {
-    if (!MY_SPEC.null_string_.empty()) {
+    if (MY_SPEC.fail_if_exists_ || !MY_SPEC.null_string_.empty()) {
       ObObj null_obj;
       null_obj.set_varchar(MY_SPEC.null_string_);
       null_obj.set_collation_type(cs_type_);

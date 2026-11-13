@@ -332,10 +332,12 @@ bool is_blank_line(const std::string &line)
   return blank;
 }
 
-int read_csv_record(std::istream &stream, std::vector<std::string> &fields, bool &has_record, const std::string &csv_options = std::string())
+int read_csv_record(std::istream &stream, std::vector<std::string> &fields, bool &has_record, const std::string &csv_options = std::string(),
+                    std::vector<bool> *quoted_fields = nullptr)
 {
   int ret = OB_SUCCESS;
   fields.clear();
+  if (quoted_fields != nullptr) quoted_fields->clear();
   has_record = false;
   std::string field;
   const char delimiter = csv_options.empty() ? ',' : csv_options[0];
@@ -355,6 +357,7 @@ int read_csv_record(std::istream &stream, std::vector<std::string> &fields, bool
         ret = OB_ITER_END;
       } else {
         fields.push_back(field);
+        if (quoted_fields != nullptr) quoted_fields->push_back(quoted_field);
         has_record = true;
       }
       break;
@@ -392,18 +395,21 @@ int read_csv_record(std::istream &stream, std::vector<std::string> &fields, bool
     } else if (after_quote) {
       if (delimiter == ch) {
         fields.push_back(field);
+        if (quoted_fields != nullptr) quoted_fields->push_back(quoted_field);
         field.clear();
         quoted_field = false;
         after_quote = false;
         first_char = true;
       } else if ('\n' == ch) {
         fields.push_back(field);
+        if (quoted_fields != nullptr) quoted_fields->push_back(quoted_field);
         break;
       } else if ('\r' == ch) {
         if ('\n' == stream.peek()) {
           stream.get();
         }
         fields.push_back(field);
+        if (quoted_fields != nullptr) quoted_fields->push_back(quoted_field);
         break;
       } else {
         ret = OB_INVALID_DATA;
@@ -414,17 +420,20 @@ int read_csv_record(std::istream &stream, std::vector<std::string> &fields, bool
       first_char = false;
     } else if (delimiter == ch) {
       fields.push_back(field);
+        if (quoted_fields != nullptr) quoted_fields->push_back(quoted_field);
       field.clear();
       quoted_field = false;
       first_char = true;
     } else if ('\n' == ch) {
       fields.push_back(field);
+        if (quoted_fields != nullptr) quoted_fields->push_back(quoted_field);
       break;
     } else if ('\r' == ch) {
       if ('\n' == stream.peek()) {
         stream.get();
       }
       fields.push_back(field);
+        if (quoted_fields != nullptr) quoted_fields->push_back(quoted_field);
       break;
     } else if (quote == ch && !quoted_field) {
       ret = OB_INVALID_DATA;
@@ -478,12 +487,14 @@ bool parse_strict_datetime(const std::string &text, int64_t &datetime_value)
   return valid;
 }
 
-ParsedValue parse_csv_value(const std::string &text, const std::string &csv_options)
+ParsedValue parse_csv_value(const std::string &text, const std::string &csv_options, bool quoted)
 {
   ParsedValue value;
   value.text_ = text;
-  if (text.empty() || (!csv_options.empty() && text == csv_options.substr(3))) {
+  if (!quoted && (text.empty() || (!csv_options.empty() && text == csv_options.substr(3)))) {
     value.type_ = ObFileColumnType::NULL_TYPE;
+  } else if (text.empty() || (!csv_options.empty() && text == csv_options.substr(3))) {
+    value.type_ = ObFileColumnType::VARCHAR;
   } else if (ascii_iequal(text, "true") || ascii_iequal(text, "false")) {
     value.type_ = ObFileColumnType::BOOLEAN;
     value.bool_value_ = ascii_iequal(text, "true");
@@ -727,12 +738,13 @@ int infer_csv_schema(const std::string &path,
   std::unique_ptr<std::streambuf> stream_buffer;
   std::unique_ptr<std::istream> stream;
   std::vector<std::string> fields;
+  std::vector<bool> quoted_fields;
   bool has_record = false;
   columns.clear();
   row_count = 0;
   if (OB_FAIL(open_safe_input_stream(path, stream_buffer, stream))) {
     LOG_WARN("failed to safely open csv file", K(ret));
-  } else if (OB_FAIL(read_csv_record(*stream, fields, has_record, csv_options))) {
+  } else if (OB_FAIL(read_csv_record(*stream, fields, has_record, csv_options, &quoted_fields))) {
     if (OB_ITER_END == ret) {
       ret = OB_INVALID_DATA;
     }
@@ -767,7 +779,7 @@ int infer_csv_schema(const std::string &path,
     if (has_header || row_count > 0) {
       fields.clear();
       has_record = false;
-      ret = read_csv_record(*stream, fields, has_record, csv_options);
+      ret = read_csv_record(*stream, fields, has_record, csv_options, &quoted_fields);
     } else {
       ret = OB_SUCCESS;
     }
@@ -781,7 +793,7 @@ int infer_csv_schema(const std::string &path,
     } else {
       ++row_count;
       for (size_t i = 0; i < columns.size(); ++i) {
-        const ParsedValue value = i < fields.size() ? parse_csv_value(fields[i], csv_options) : ParsedValue();
+        const ParsedValue value = i < fields.size() ? parse_csv_value(fields[i], csv_options, quoted_fields[i]) : ParsedValue();
         columns[i].nullable_ = columns[i].nullable_ || ObFileColumnType::NULL_TYPE == value.type_;
         columns[i].type_ = merge_type(columns[i].type_, value.type_);
         columns[i].max_length_ = std::max(columns[i].max_length_, static_cast<int64_t>(value.text_.length()));
@@ -1312,11 +1324,12 @@ int ObFileScanReader::get_next_csv_row(std::vector<ObFileCell> &cells)
 {
   int ret = OB_SUCCESS;
   std::vector<std::string> fields;
+  std::vector<bool> quoted_fields;
   bool has_record = false;
   cells.assign(columns_.size(), ObFileCell());
   if (!csv_header_read_) {
     ret = OB_NOT_INIT;
-  } else if (OB_FAIL(read_csv_record(*stream_, fields, has_record, csv_options_))) {
+  } else if (OB_FAIL(read_csv_record(*stream_, fields, has_record, csv_options_, &quoted_fields))) {
     // return iterator end or parse error
   } else if (fields.size() > columns_.size()) {
     ret = OB_INVALID_DATA;
@@ -1324,7 +1337,7 @@ int ObFileScanReader::get_next_csv_row(std::vector<ObFileCell> &cells)
     ++current_row_number_;
     for (size_t i = 0; OB_SUCC(ret) && i < fields.size(); ++i) {
       if (projected_columns_[i]) {
-        const ParsedValue value = parse_csv_value(fields[i], csv_options_);
+        const ParsedValue value = parse_csv_value(fields[i], csv_options_, quoted_fields[i]);
         if (OB_FAIL(convert_value(value, columns_[i].type_, cells[i]))) {
           LOG_WARN("failed to convert csv field", K(ret), K(i), K(current_row_number_));
         }

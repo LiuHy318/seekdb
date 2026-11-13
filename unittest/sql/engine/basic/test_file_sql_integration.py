@@ -131,6 +131,24 @@ class FileSQLIntegration(unittest.TestCase):
         finally:
             output.unlink(missing_ok=True)
 
+    def test_copy_default_null_roundtrip(self):
+        output = self.root / 'default-null.txt'
+        output.unlink(missing_ok=True)
+        try:
+            self.query(f"copy (select 1 as id,NULL as note) to '{self.file('default-null.txt')}' (format csv,header)")
+            self.assertEqual(((1, None),), self.query(f"select * from read_csv('{self.file('default-null.txt')}')"))
+        finally:
+            output.unlink(missing_ok=True)
+
+    def test_quoted_null_marker_and_empty_string_preserved(self):
+        path = self.root / 'quoted-null.txt'
+        path.write_text('id;note\n1;missing\n2;~missing~\n3;~~\n', encoding='utf8')
+        try:
+            self.assertEqual(((1, None), (2, 'missing'), (3, '')), self.query(
+                f"select * from read_csv('{self.file('quoted-null.txt')}',delim=';',quote='~',nullstr='missing') order by id"))
+        finally:
+            path.unlink(missing_ok=True)
+
 
 if __name__ == '__main__':
     unittest.main()

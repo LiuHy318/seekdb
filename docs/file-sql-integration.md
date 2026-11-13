@@ -39,3 +39,5 @@ COPY (SELECT 1 AS id, NULL AS note) TO '/allowed/custom.csv'
   (FORMAT CSV, HEADER, DELIMITER ';', QUOTE '~', ESCAPE '~', NULLSTR 'missing');
 SELECT * FROM read_csv('/allowed/custom.csv', delimiter=';', quote='~', escape='~', nullstr='missing');
 ```
+
+COPY 默认 NULL 以空字段导出。读取时保留引号信息，区分未加引号的 NULL 标记与加引号的同名文本或空字符串。
