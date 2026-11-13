@@ -86,6 +86,10 @@ private:
 
   StopWordSet stopword_set_;
   ObObjMeta stopword_type_;
+  // The byte length of the longest stop word in ob_stop_word_list. A word
+  // longer than this can never be a stop word, so the hot path can skip the
+  // charset conversion and the hash lookup entirely.
+  int64_t max_word_len_ = 0;
 
   bool inited_ = false;
 
@@ -120,6 +124,7 @@ public:
 
 private:
   bool is_min_max_word(const int64_t c_len) const;
+  static bool is_lower_case_ascii_word(const common::ObString &word);
   int casedown_word(const ObFTWord &src, ObFTWord &dst);
   int check_stopword(const ObFTWord &word, bool &is_stopword);
   int groupby_word(const ObFTWord &word, const int64_t word_cnt);
