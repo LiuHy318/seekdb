@@ -24,6 +24,7 @@
 #include "lib/ob_errno.h"
 #include "lib/oblog/ob_log_module.h"
 #include "lib/utility/ob_macro_utils.h"
+#include "lib/utility/alloc_assist.h"
 #include "lib/utility/utility.h"
 #include "lib/utility/ob_smart_var.h"
 #include "share/inner_table/ob_inner_table_schema_constants.h"
@@ -389,21 +390,51 @@ int ObFTRangeDict::match_with_hit(const ObString &single_word,
   return last_hit.dict_->match_with_hit(single_word, last_hit, hit);
 }
 
+int ObFTRangeDict::binary_compare(const ObString &lhs, const ObString &rhs)
+{
+  int cmp = 0;
+  const int32_t min_len = lhs.length() < rhs.length() ? lhs.length() : rhs.length();
+  if (min_len > 0) {
+    cmp = MEMCMP(lhs.ptr(), rhs.ptr(), min_len);
+  }
+  if (0 == cmp) {
+    cmp = static_cast<int>(lhs.length() - rhs.length());
+  }
+  return cmp;
+}
+
 int ObFTRangeDict::find_first_char_range(const ObString &single_word, ObIFTDict *&dict) const
 {
   int ret = OB_SUCCESS;
   bool found = false;
-  for (int i = 0; OB_SUCC(ret) && !found && i < range_dicts_.size(); ++i) {
-    if (ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                          range_dicts_[i].start_.get_word(),
-                          single_word)
-            <= 0
-        && ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                             range_dicts_[i].end_.get_word(),
-                             single_word)
-               >= 0) {
-      dict = range_dicts_[i].dict_;
+  const int64_t range_cnt = range_dicts_.size();
+  if (ranges_sorted_ && range_cnt > 0) {
+    // range_dicts_ is ordered by start_ word, so locate the last range whose
+    // start_ is not greater than the word with a binary search.
+    int64_t left = 0;
+    int64_t right = range_cnt - 1;
+    int64_t candidate = -1;
+    while (left <= right) {
+      const int64_t mid = left + ((right - left) >> 1);
+      if (binary_compare(range_dicts_[mid].start_.get_word(), single_word) <= 0) {
+        candidate = mid;
+        left = mid + 1;
+      } else {
+        right = mid - 1;
+      }
+    }
+    if (candidate >= 0
+        && binary_compare(range_dicts_[candidate].end_.get_word(), single_word) >= 0) {
+      dict = range_dicts_[candidate].dict_;
       found = true;
+    }
+  } else {
+    for (int i = 0; OB_SUCC(ret) && !found && i < range_cnt; ++i) {
+      if (binary_compare(range_dicts_[i].start_.get_word(), single_word) <= 0
+          && binary_compare(range_dicts_[i].end_.get_word(), single_word) >= 0) {
+        dict = range_dicts_[i].dict_;
+        found = true;
+      }
     }
   }
   if (!found) {
@@ -416,6 +447,8 @@ int ObFTRangeDict::find_first_char_range(const ObString &single_word, ObIFTDict 
 int ObFTRangeDict::build_dict_from_cache(const ObFTCacheRangeContainer &range_container)
 {
   int ret = OB_SUCCESS;
+  ObString last_start_word;
+  bool has_last_start_word = false;
   for (ObList<ObFTCacheRangeHandle *, ObIAllocator>::const_iterator iter = range_container.get_handles().begin();
        OB_SUCC(ret) && iter != range_container.get_handles().end();
        iter++) {
@@ -426,6 +459,13 @@ int ObFTRangeDict::build_dict_from_cache(const ObFTCacheRangeContainer &range_co
       ret = OB_ALLOCATE_MEMORY_FAILED;
       LOG_WARN("Failed to alloc memory.", K(ret));
     } else {
+      if (has_last_start_word
+          && binary_compare(last_start_word, dat->start_word_.get_word()) > 0) {
+        // ranges are expected to be ordered, keep the linear scan if they are not
+        ranges_sorted_ = false;
+      }
+      last_start_word = dat->start_word_.get_word();
+      has_last_start_word = true;
       ObFTRange range;
       range.start_ = dat->start_word_;
       range.end_ = dat->end_word_;
