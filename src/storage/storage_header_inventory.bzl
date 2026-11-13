@@ -701,6 +701,7 @@ STORAGE_PRIVATE_HEADERS = [
     "fts/ob_fts_parser.h",
     "fts/ob_fts_parser_helper.h",
     "fts/ob_fts_parser_property.h",
+    "fts/ob_ft_token_cache.h",
     "fts/ob_fts_stop_word.h",
     "fts/ob_fts_struct.h",
     "fts/ob_ik_ft_parser.h",

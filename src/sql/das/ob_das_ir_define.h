@@ -204,7 +204,8 @@ public:
   ObDASIRScanRtDef()
     : ObDASAttachRtDef(DAS_OP_IR_SCAN),
       fts_idx_(OB_INVALID_INDEX),
-      minimum_should_match_(0) {}
+      minimum_should_match_(0),
+      pushdown_limit_param_() {}
 
   virtual ~ObDASIRScanRtDef() {}
 
@@ -255,6 +256,9 @@ public:
   // fts_idx_ is dynamically generated during execution based on the rtdef tree and does not need to be serialized.
   int64_t fts_idx_;
   int64_t minimum_should_match_;
+  // The number of rows the operator above this scan will read, when that is
+  // known. Like fts_idx_ it is filled in at execution time, not deserialized.
+  ObLimitParam pushdown_limit_param_;
 };
 
 struct ObDASIRAuxLookupCtDef : ObDASAttachCtDef

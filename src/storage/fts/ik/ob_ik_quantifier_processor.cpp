@@ -51,8 +51,7 @@ int ObIKQuantifierProcessor::process_CN_number(TokenizeContext &ctx,
   bool is_cn_number = false;
 
   if (ObFTCharUtil::CharType::CHINESE == type
-      && OB_FAIL(ObFTCharUtil::check_cn_number(ctx.collation(), ch, char_len, is_cn_number))) {
-    LOG_WARN("Fail to check is cn number", K(ret));
+      && OB_FAIL(ctx.check_current_cn_number(is_cn_number))) {
   } else if (start_ == -1 && end_ == -1) {
     if (is_cn_number) {
       start_ = ctx.get_cursor();
@@ -144,7 +143,6 @@ int ObIKQuantifierProcessor::process_CN_count(TokenizeContext &ctx,
           count_hits_.clear();
         } else {
           ret = OB_UNEXPECT_INTERNAL_ERROR;
-          LOG_WARN("Reached an imposible state.", K(ret));
         }
       }
     } else {

@@ -14,6 +14,9 @@
  * limitations under the License.
  */
 
+#include <algorithm>
+#include <array>
+
 #include "object/ob_object.h"
 #define USING_LOG_PREFIX STORAGE_FTS
 
@@ -37,8 +40,8 @@ ObStopWordChecker::~ObStopWordChecker()
 int ObStopWordChecker::init()
 {
   int ret = OB_SUCCESS;
-
-
+  
+  
 
   if (inited_) {
     ret = OB_INIT_TWICE;
@@ -71,19 +74,84 @@ void ObStopWordChecker::destroy()
   }
 }
 
+namespace
+{
+// Zero means this needs the general collation-aware path. Only ASCII letters
+// are encoded: accents, padding, controls and other charsets retain conversion
+// and UTF8MB4_GENERAL_CI comparison semantics.
+uint64_t ascii_stopword_key(const ObString &word)
+{
+  uint64_t key = 0;
+  if (word.empty() || word.length() > 7) {
+    return 0;
+  }
+  for (int64_t i = 0; i < word.length(); ++i) {
+    const unsigned char byte = static_cast<unsigned char>(word.ptr()[i]);
+    const unsigned char lower = byte >= 'A' && byte <= 'Z' ? byte + ('a' - 'A') : byte;
+    if (lower < 'a' || lower > 'z') {
+      return 0;
+    }
+    key = (key << 8) | lower;
+  }
+  return key;
+}
+
+bool check_ascii_stopword(const ObString &word, bool &is_stopword)
+{
+  const uint64_t key = ascii_stopword_key(word);
+  if (key == 0) {
+    if (word.length() <= 7) {
+      return false;
+    }
+    // A long word of ASCII letters cannot equal any valid short key below.
+    // Other bytes retain the collation-aware path (accents, padding, errors).
+    for (int64_t i = 0; i < word.length(); ++i) {
+      const unsigned char byte = static_cast<unsigned char>(word.ptr()[i]);
+      if (!((byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z'))) {
+        return false;
+      }
+    }
+  }
+  // Derive from the same built-in list as the collation-aware hash set, so
+  // adding a stopword cannot make the two paths disagree.
+  struct AsciiStopwords
+  {
+    std::array<uint64_t, sizeof(ob_stop_word_list) / sizeof(ob_stop_word_list[0])> keys_;
+    bool valid_;
+  };
+  static const auto words = [] {
+    AsciiStopwords result{};
+    result.valid_ = true;
+    for (size_t i = 0; i < result.keys_.size(); ++i) {
+      result.keys_[i] = ascii_stopword_key(ObString::make_string(ob_stop_word_list[i]));
+      result.valid_ = result.valid_ && result.keys_[i] != 0;
+    }
+    std::sort(result.keys_.begin(), result.keys_.end());
+    return result;
+  }();
+  if (!words.valid_) {
+    return false;
+  }
+  is_stopword = key != 0 && std::binary_search(words.keys_.begin(), words.keys_.end(), key);
+  return true;
+}
+} // namespace
+
 int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
 {
   int ret = OB_SUCCESS;
-
-
-  common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
+  
+  
   if (OB_UNLIKELY(!inited_)) {
     ret = OB_NOT_INIT;
-    LOG_WARN("ObStopWordChecker hasn't been initialized", K(ret), K(inited_));
   } else if (OB_UNLIKELY(word.empty())) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("word is empty", K(ret), K(word));
+  } else if (ObCharset::is_valid_collation(word.get_collation_type())
+      && ObCharset::charset_type_by_coll(word.get_collation_type()) == CHARSET_UTF8MB4
+      && check_ascii_stopword(word.get_word().get_string(), is_stopword)) {
+    // No conversion, allocator or collation hash is needed for ASCII letters.
   } else {
+    common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
     common::ObString cmp_str;
     // do nothing set out with in if type is the same.
     if (OB_FAIL(common::ObCharset::charset_convert(
@@ -103,9 +171,7 @@ int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
         ret = OB_SUCCESS;
       } else if (OB_SUCC(ret)) {
         ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("the exist of hastset shouldn't return success", K(ret), K(word), K(converted));
       } else {
-        LOG_WARN("fail to do exist", K(ret), K(word), K(converted));
       }
     }
   }
@@ -144,7 +210,6 @@ int ObAddWord::process_word(
   ObFTWord dst_word;
   if (OB_ISNULL(word) || OB_UNLIKELY(0 >= word_len || 0 >= char_cnt || 0 >= word_freq)) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid arguments", K(ret), KP(word), K(word_len), K(char_cnt), K(word_freq));
   } else if (is_min_max_word(char_cnt)) {
     ++min_max_word_cnt_;
   } else if (OB_FAIL(casedown_word(src_word, dst_word))) {
@@ -168,17 +233,39 @@ int ObAddWord::casedown_word(const ObFTWord &src, ObFTWord &dst)
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(src.empty())) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid src ft word", K(ret), K(src));
   } else if (flag_.casedown()) {
-    ObString dst_str;
-    if (OB_FAIL(ObCharset::tolower(
-                    word_meta_.get_collation_type(),
-                    src.get_word().get_string(),
-                    dst_str,
-                    allocator_))) {
+    const ObString src_str = src.get_word().get_string();
+    const ObCollationType coll_type = word_meta_.get_collation_type();
+    const ObCharsetInfo *cs = ObCharset::get_charset(coll_type);
+    // Most tokens have no upper case bytes at all (CJK tokens, or lower case
+    // words that were already folded by the analyzer), so convert a copy on the
+    // stack first and only take the allocator when the bytes really change.
+    constexpr int64_t STACK_CASEDOWN_LEN = 256;
+    if (OB_ISNULL(cs)) {
+      ret = OB_INVALID_ARGUMENT;
+    } else if (1 == cs->casedn_multiply && src_str.length() <= STACK_CASEDOWN_LEN) {
+      char buf[STACK_CASEDOWN_LEN];
+      MEMCPY(buf, src_str.ptr(), src_str.length());
+      const size_t size = cs->cset->casedn(cs, buf, src_str.length(), buf, src_str.length());
+      if (size == src_str.length() && 0 == MEMCMP(buf, src_str.ptr(), size)) {
+        dst = src;
+      } else {
+        char *ptr = nullptr;
+        if (OB_ISNULL(ptr = static_cast<char *>(allocator_.alloc(src_str.length())))) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+        } else {
+          MEMCPY(ptr, buf, size);
+          ObFTWord tmp(size, ptr, word_meta_);
+          dst = tmp;
+        }
+      }
     } else {
-      ObFTWord tmp(dst_str.length(), dst_str.ptr(), word_meta_);
-      dst = tmp;
+      ObString dst_str;
+      if (OB_FAIL(ObCharset::tolower(coll_type, src_str, dst_str, allocator_))) {
+      } else {
+        ObFTWord tmp(dst_str.length(), dst_str.ptr(), word_meta_);
+        dst = tmp;
+      }
     }
   } else {
     dst = src;
@@ -191,12 +278,10 @@ int ObAddWord::check_stopword(const ObFTWord &ft_word, bool &is_stopword)
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(ft_word.empty())) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid arguments", K(ret), K(ft_word));
   } else if (flag_.stopword()) {
     ObStopWordChecker *stop_word_checker = ObFTParseData::instance().stop_word_checker();
     if (OB_ISNULL(stop_word_checker)) {
       ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("got null stop word checker", K(ret));
     } else if (OB_FAIL(stop_word_checker->check_stopword(ft_word, is_stopword))) {
     }
   }
@@ -206,23 +291,15 @@ int ObAddWord::check_stopword(const ObFTWord &ft_word, bool &is_stopword)
 int ObAddWord::groupby_word(const ObFTWord &word, const int64_t word_freq)
 {
   int ret = OB_SUCCESS;
-  int64_t word_count = 0;
   if (OB_UNLIKELY(word.empty() || word_freq <= 0)) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid arguments", K(ret), K(word), K(word_freq));
   } else if (!flag_.groupby_word()) {
-    if (OB_FAIL(word_map_.set_refactored(word, 1/*word count*/))) {
-    }
-  } else if (OB_FAIL(word_map_.get_refactored(word, word_count)) && OB_HASH_NOT_EXIST != ret) {
-    LOG_WARN("fail to get fulltext word", K(ret), K(word));
+    ret = word_map_.set_refactored(word, 1/*word count*/);
   } else {
-    if (OB_HASH_NOT_EXIST == ret) {
-      word_count = 1;
-    } else {
-      word_count += word_freq;
-    }
-    if (OB_FAIL(word_map_.set_refactored(word, word_count, 1/*overwrite*/))) {
-    }
+    // The map belongs to this document's synchronous parse. Insert new words
+    // and update repeated words with a single collation-aware hash lookup.
+    auto update_count = [word_freq](auto &pair) { pair.second += word_freq; };
+    ret = word_map_.set_or_update(word, 1/*first occurrence*/, update_count);
   }
   return ret;
 }

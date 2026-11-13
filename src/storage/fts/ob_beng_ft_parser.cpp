@@ -42,20 +42,17 @@ int ObBEngFTParser::get_next_token(
   word_freq = 0;
   if (OB_UNLIKELY(!is_inited_)) {
     ret = OB_NOT_INIT;
-    LOG_WARN("beng ft parser isn't initialized", K(ret), K(is_inited_));
+  } else if (ascii_document_) {
+    ret = get_next_ascii_token(word, word_len, char_len, word_freq);
   } else if (OB_ISNULL(token_stream_)) {
     ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("token stream is nullptr", K(ret), KP(token_stream_));
   } else if (OB_FAIL(token_stream_->get_next(token, token_freq))) {
     if (OB_ITER_END != ret) {
-      LOG_WARN("fail to get next token", K(ret), KPC(token_stream_));
     }
   } else if (OB_ISNULL(token.ptr_) || OB_UNLIKELY(0 >= token.len_ || 0 >= token_freq)) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid arguments", K(ret), KP(token.ptr_), K(token.len_), K(token_freq));
   } else if (OB_ISNULL(buf = static_cast<char *>(allocator_.alloc(token.len_)))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
-    LOG_WARN("fail to allocate word memory", K(ret), K(token.len_));
   } else {
     MEMCPY(buf, token.ptr_, token.len_);
     word = buf;
@@ -67,28 +64,70 @@ int ObBEngFTParser::get_next_token(
   return ret;
 }
 
+int ObBEngFTParser::get_next_ascii_token(
+    const char *&word, int64_t &word_len, int64_t &char_len, int64_t &word_freq)
+{
+  int ret = OB_SUCCESS;
+  const auto is_alnum = [](const unsigned char byte) {
+    return (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z')
+        || (byte >= '0' && byte <= '9');
+  };
+  // In UTF8MB4, every ASCII non-alphanumeric byte is a whitespace,
+  // punctuation or control delimiter in the existing analysis pipeline.
+  while (ascii_cursor_ < doc_.len_ && !is_alnum(doc_.ptr_[ascii_cursor_])) {
+    ++ascii_cursor_;
+  }
+  const uint32_t start = ascii_cursor_;
+  while (ascii_cursor_ < doc_.len_ && is_alnum(doc_.ptr_[ascii_cursor_])) {
+    ++ascii_cursor_;
+  }
+  const uint32_t length = ascii_cursor_ - start;
+  char *buf = nullptr;
+  if (length == 0) {
+    ret = OB_ITER_END;
+  } else if (OB_ISNULL(buf = static_cast<char *>(allocator_.alloc(length)))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+  } else {
+    // Preserve the original parser's owned token lifetime. Only the transient
+    // tokenizer/normalizer objects and their extra copy are omitted.
+    for (uint32_t i = 0; i < length; ++i) {
+      const char byte = doc_.ptr_[start + i];
+      buf[i] = byte >= 'A' && byte <= 'Z' ? byte + ('a' - 'A') : byte;
+    }
+    word = buf;
+    word_len = length;
+    char_len = length;
+    word_freq = 1;
+  }
+  return ret;
+}
+
 int ObBEngFTParser::init(ObFTParserParam *param)
 {
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(is_inited_)) {
     ret = OB_INIT_TWICE;
-    LOG_WARN("init twice", K(ret), K(is_inited_));
   } else if (OB_ISNULL(param) || OB_UNLIKELY(!param->is_valid())) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("param is nullptr", K(ret), KPC(param));
   } else if (OB_UNLIKELY(UINT32_MAX < param->ft_length_)) {
     ret = OB_NOT_SUPPORTED;
-    LOG_WARN("too large document, english analyzer hasn't be supported", K(ret), K(param->ft_length_));
   } else {
     doc_.set_string(param->fulltext_, param->ft_length_);
     analysis_ctx_.cs_ = param->cs_;
     analysis_ctx_.filter_stopword_ = false;
     analysis_ctx_.need_grouping_ = false;
-    if (OB_FAIL(english_analyzer_.init(analysis_ctx_, *param->allocator_))) {
+    ascii_cursor_ = 0;
+    ascii_document_ = ObCharset::charset_type_by_coll(
+        static_cast<ObCollationType>(param->cs_->number)) == CHARSET_UTF8MB4;
+    for (uint32_t i = 0; ascii_document_ && i < doc_.len_; ++i) {
+      ascii_document_ = static_cast<unsigned char>(doc_.ptr_[i]) < 0x80;
+    }
+    if (ascii_document_) {
+      is_inited_ = true;
+    } else if (OB_FAIL(english_analyzer_.init(analysis_ctx_, *param->allocator_))) {
     } else if (OB_FAIL(segment(doc_, token_stream_))) {
     } else if (OB_ISNULL(token_stream_)) {
       ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("token stream is nullptr", K(ret), KP(token_stream_));
     } else {
       is_inited_ = true;
     }
@@ -106,10 +145,8 @@ int ObBEngFTParser::segment(
   int ret = OB_SUCCESS;
   if (OB_ISNULL(doc.ptr_) || OB_UNLIKELY(0 >= doc.len_)) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid arguments", K(ret), KP(doc.ptr_), K(doc.len_));
   } else if (OB_UNLIKELY(UINT32_MAX < doc.len_)) {
     ret = OB_NOT_SUPPORTED;
-    LOG_WARN("too large document, english analyzer hasn't be supported", K(ret), K(doc.len_));
   } else if (OB_FAIL(english_analyzer_.analyze(doc, token_stream))) {
   }
   return ret;
@@ -121,6 +158,8 @@ void ObBEngFTParser::reset()
   english_analyzer_.reset();
   doc_.reset();
   token_stream_ = nullptr;
+  ascii_cursor_ = 0;
+  ascii_document_ = false;
   is_inited_ = false;
 }
 
@@ -134,10 +173,8 @@ int ObBasicEnglishFTParserDesc::segment(
   ObBEngFTParser *parser = nullptr;
   if (OB_ISNULL(param) || OB_ISNULL(param->fulltext_) || OB_UNLIKELY(!param->is_valid())) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid argument", K(ret), KPC(param));
   } else if (OB_ISNULL(parser = OB_NEWx(ObBEngFTParser, param->allocator_, *(param->allocator_)))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
-    LOG_WARN("fail to allocate basic english ft parser", K(ret));
   } else if (OB_FAIL(parser->init(param))) {
   } else {
     iter = parser;

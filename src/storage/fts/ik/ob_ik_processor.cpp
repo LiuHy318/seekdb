@@ -51,9 +51,12 @@ TokenizeContext::TokenizeContext(ObCollationType coll_type,
                                  const char *fulltext,
                                  int64_t fulltext_len,
                                  bool is_smart)
-    : coll_type_(coll_type), fulltext_(fulltext), fulltext_len_(fulltext_len), cursor_(0),
-      next_char_len_(0), handle_size_(0), is_smart_(is_smart), token_list_(allocator),
-      result_list_(allocator)
+    : coll_type_(coll_type), cs_(ObCharset::get_charset(coll_type)), fulltext_(fulltext),
+      fulltext_len_(fulltext_len), cursor_(0), next_char_len_(0),
+      next_unicode_(0), is_utf8mb4_(cs_ != nullptr && cs_->cset != nullptr
+          && ObCharset::charset_type_by_coll(coll_type) == CHARSET_UTF8MB4),
+      has_decoded_unicode_(false), handle_size_(0),
+      is_smart_(is_smart), token_list_(allocator), result_list_(allocator)
 {
 }
 
@@ -102,14 +105,64 @@ int TokenizeContext::current_char_type(ObFTCharUtil::CharType &type)
 int TokenizeContext::prepare_next_char()
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(ObCharset::first_valid_char(coll_type_,
-                                          fulltext_ + cursor_,
-                                          fulltext_len_ - cursor_,
-                                          next_char_len_))) {
+  has_decoded_unicode_ = false;
+  if (is_utf8mb4_) {
+    const unsigned char *start = reinterpret_cast<const unsigned char *>(fulltext_ + cursor_);
+    const unsigned char *end = reinterpret_cast<const unsigned char *>(fulltext_ + fulltext_len_);
+    const int length = common::ob_charset_decode_unicode<CHARSET_UTF8MB4>(start, end, next_unicode_);
+    if (length > 0) {
+      next_char_len_ = length;
+      next_char_type_ = ObFTCharUtil::classify_unicode(next_unicode_);
+      has_decoded_unicode_ = true;
+    }
+  }
+  if (has_decoded_unicode_) {
+    // The UTF-8 decoder validates and measures the same character it classifies.
+    // Other charsets and malformed UTF-8 retain the original error path below.
+  } else if (OB_FAIL(ObCharset::first_valid_char(coll_type_,
+                                                fulltext_ + cursor_,
+                                                fulltext_len_ - cursor_,
+                                                next_char_len_))) {
   } else if (OB_FAIL(ObFTCharUtil::classify_first_char(coll_type_,
                                                        fulltext_ + cursor_,
                                                        next_char_len_,
                                                        next_char_type_))) {
+  }
+  return ret;
+}
+
+int TokenizeContext::char_at(const int64_t pos,
+                             int64_t &char_len,
+                             ObFTCharUtil::CharType &type) const
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(pos < 0 || pos >= fulltext_len_)) {
+    ret = OB_ITER_END;
+  } else if (is_utf8mb4_) {
+    const unsigned char *start = reinterpret_cast<const unsigned char *>(fulltext_ + pos);
+    const unsigned char *end = reinterpret_cast<const unsigned char *>(fulltext_ + fulltext_len_);
+    ob_wc_t wc = 0;
+    const int len = common::ob_charset_decode_unicode<CHARSET_UTF8MB4>(start, end, wc);
+    if (len > 0) {
+      char_len = len;
+      type = ObFTCharUtil::classify_unicode(wc);
+    } else if (OB_FAIL(ObCharset::first_valid_char(coll_type_,
+                                                  fulltext_ + pos,
+                                                  fulltext_len_ - pos,
+                                                  char_len))) {
+    } else if (OB_FAIL(ObFTCharUtil::classify_first_char(coll_type_,
+                                                         fulltext_ + pos,
+                                                         char_len,
+                                                         type))) {
+    }
+  } else if (OB_FAIL(ObCharset::first_valid_char(coll_type_,
+                                                fulltext_ + pos,
+                                                fulltext_len_ - pos,
+                                                char_len))) {
+  } else if (OB_FAIL(ObFTCharUtil::classify_first_char(coll_type_,
+                                                       fulltext_ + pos,
+                                                       char_len,
+                                                       type))) {
   }
   return ret;
 }
@@ -126,7 +179,6 @@ int TokenizeContext::step_next()
   } else if (cursor_ < fulltext_len_ && 0 == next_char_len_) {
     // should not happen
     ret = OB_UNEXPECT_INTERNAL_ERROR;
-    LOG_WARN("Unexpected error", K(ret));
   } else {
     cursor_ += next_char_len_;
     handle_size_++;
