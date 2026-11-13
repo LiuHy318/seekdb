@@ -1,0 +1,127 @@
+# description: Preserve observable tokenization, score and LIMIT semantics in FTS fast paths.
+--disable_warnings
+DROP DATABASE IF EXISTS fts_tuning_regression;
+--enable_warnings
+CREATE DATABASE fts_tuning_regression DEFAULT CHARACTER SET utf8mb4;
+USE fts_tuning_regression;
+SET ob_query_timeout = 10000000000;
+
+CREATE TABLE docs (
+  id INT PRIMARY KEY,
+  body TEXT,
+  FULLTEXT INDEX ft(body) WITH PARSER beng
+);
+INSERT INTO docs VALUES
+  (1, 'database database performance audit'),
+  (2, 'database performance'),
+  (3, 'database audit stable stable stable'),
+  (4, 'performance database stable'),
+  (5, 'database performance performance'),
+  (6, 'unrelated text'),
+  (7, NULL),
+  (8, '');
+
+--error ER_NOT_SUPPORTED_YET
+SELECT TOKENIZE(NULL, 'ik');
+SELECT TOKENIZE('研究生命起源 OceanBase 数据库 全文索引', 'ik');
+SELECT TOKENIZE('研究生命起源 OceanBase 数据库 全文索引', 'ik', '[{"additional_args":[{"ik_mode":"max_word"}]}]');
+SELECT TOKENIZE('The QUICK brown fox. databases audit', 'beng');
+SELECT TOKENIZE('', 'ik');
+--error ER_NOT_SUPPORTED_YET
+SELECT TOKENIZE(NULL, 'ik');
+--error ER_NOT_SUPPORTED_YET
+SELECT TOKENIZE(CAST('database' AS BINARY), 'ik');
+
+# Predicate-only retrieval must produce the same rows as score-producing retrieval.
+SELECT COUNT(*) FROM docs WHERE MATCH(body) AGAINST('database performance');
+SELECT id FROM docs WHERE MATCH(body) AGAINST('database performance') ORDER BY id;
+SELECT /*+ FULL(docs) */ id FROM docs WHERE MATCH(body) AGAINST('database') ORDER BY id;
+SELECT id, ROUND(MATCH(body) AGAINST('database performance'), 6) AS score
+  FROM docs WHERE MATCH(body) AGAINST('database performance') ORDER BY id;
+SELECT id FROM docs WHERE MATCH(body) AGAINST('database performance') > 0 ORDER BY id;
+SELECT id FROM docs WHERE MATCH(body) AGAINST('database performance') > 1000 ORDER BY id;
+SELECT id FROM docs WHERE MATCH(body) AGAINST('+database -audit' IN BOOLEAN MODE) ORDER BY id;
+SELECT id FROM docs WHERE MATCH(body) AGAINST('unmatchedtoken') ORDER BY id;
+SELECT id FROM docs WHERE MATCH(body) AGAINST('database') OR id = 6 ORDER BY id;
+SELECT id FROM docs WHERE NOT MATCH(body) AGAINST('database') ORDER BY id;
+
+# Numeric MATCH consumers in ON clauses must retain the actual score.
+CREATE TABLE joined_u (id INT PRIMARY KEY);
+INSERT INTO joined_u VALUES (1), (2);
+SELECT COUNT(joined_u.id) FROM docs LEFT JOIN joined_u ON MATCH(body) AGAINST('database');
+SELECT COUNT(joined_u.id) FROM docs LEFT JOIN joined_u
+  ON MATCH(body) AGAINST('database') > 0.5
+  WHERE MATCH(body) AGAINST('database');
+SELECT COUNT(joined_u.id) FROM docs LEFT JOIN joined_u
+  ON MATCH(body) AGAINST('database') > 0
+  WHERE MATCH(body) AGAINST('database');
+SELECT COUNT(u.id), COUNT(v.id)
+  FROM (docs LEFT JOIN joined_u u ON MATCH(body) AGAINST('database') > 0.5)
+  LEFT JOIN joined_u v ON u.id = v.id
+  WHERE MATCH(body) AGAINST('database');
+
+# More than 256 natural-language tokens select the TAAT iterator.
+--disable_query_log
+SELECT JSON_LENGTH(TOKENIZE('database tokenaaa tokenaab tokenaac tokenaad tokenaae tokenaaf tokenaag tokenaah tokenaai tokenaaj tokenaak tokenaal tokenaam tokenaan tokenaao tokenaap tokenaaq tokenaar tokenaas tokenaat tokenaau tokenaav tokenaaw tokenaax tokenaay tokenaaz tokenaba tokenabb tokenabc tokenabd tokenabe tokenabf tokenabg tokenabh tokenabi tokenabj tokenabk tokenabl tokenabm tokenabn tokenabo tokenabp tokenabq tokenabr tokenabs tokenabt tokenabu tokenabv tokenabw tokenabx tokenaby tokenabz tokenaca tokenacb tokenacc tokenacd tokenace tokenacf tokenacg tokenach tokenaci tokenacj tokenack tokenacl tokenacm tokenacn tokenaco tokenacp tokenacq tokenacr tokenacs tokenact tokenacu tokenacv tokenacw tokenacx tokenacy tokenacz tokenada tokenadb tokenadc tokenadd tokenade tokenadf tokenadg tokenadh tokenadi tokenadj tokenadk tokenadl tokenadm tokenadn tokenado tokenadp tokenadq tokenadr tokenads tokenadt tokenadu tokenadv tokenadw tokenadx tokenady tokenadz tokenaea tokenaeb tokenaec tokenaed tokenaee tokenaef tokenaeg tokenaeh tokenaei tokenaej tokenaek tokenael tokenaem tokenaen tokenaeo tokenaep tokenaeq tokenaer tokenaes tokenaet tokenaeu tokenaev tokenaew tokenaex tokenaey tokenaez tokenafa tokenafb tokenafc tokenafd tokenafe tokenaff tokenafg tokenafh tokenafi tokenafj tokenafk tokenafl tokenafm tokenafn tokenafo tokenafp tokenafq tokenafr tokenafs tokenaft tokenafu tokenafv tokenafw tokenafx tokenafy tokenafz tokenaga tokenagb tokenagc tokenagd tokenage tokenagf tokenagg tokenagh tokenagi tokenagj tokenagk tokenagl tokenagm tokenagn tokenago tokenagp tokenagq tokenagr tokenags tokenagt tokenagu tokenagv tokenagw tokenagx tokenagy tokenagz tokenaha tokenahb tokenahc tokenahd tokenahe tokenahf tokenahg tokenahh tokenahi tokenahj tokenahk tokenahl tokenahm tokenahn tokenaho tokenahp tokenahq tokenahr tokenahs tokenaht tokenahu tokenahv tokenahw tokenahx tokenahy tokenahz tokenaia tokenaib tokenaic tokenaid tokenaie tokenaif tokenaig tokenaih tokenaii tokenaij tokenaik tokenail tokenaim tokenain tokenaio tokenaip tokenaiq tokenair tokenais tokenait tokenaiu tokenaiv tokenaiw tokenaix tokenaiy tokenaiz tokenaja tokenajb tokenajc tokenajd tokenaje tokenajf tokenajg tokenajh tokenaji tokenajj tokenajk tokenajl tokenajm tokenajn tokenajo tokenajp tokenajq tokenajr tokenajs tokenajt tokenaju tokenajv tokenajw', 'beng')) AS token_count;
+SELECT COUNT(*) FROM docs WHERE MATCH(body) AGAINST('database tokenaaa tokenaab tokenaac tokenaad tokenaae tokenaaf tokenaag tokenaah tokenaai tokenaaj tokenaak tokenaal tokenaam tokenaan tokenaao tokenaap tokenaaq tokenaar tokenaas tokenaat tokenaau tokenaav tokenaaw tokenaax tokenaay tokenaaz tokenaba tokenabb tokenabc tokenabd tokenabe tokenabf tokenabg tokenabh tokenabi tokenabj tokenabk tokenabl tokenabm tokenabn tokenabo tokenabp tokenabq tokenabr tokenabs tokenabt tokenabu tokenabv tokenabw tokenabx tokenaby tokenabz tokenaca tokenacb tokenacc tokenacd tokenace tokenacf tokenacg tokenach tokenaci tokenacj tokenack tokenacl tokenacm tokenacn tokenaco tokenacp tokenacq tokenacr tokenacs tokenact tokenacu tokenacv tokenacw tokenacx tokenacy tokenacz tokenada tokenadb tokenadc tokenadd tokenade tokenadf tokenadg tokenadh tokenadi tokenadj tokenadk tokenadl tokenadm tokenadn tokenado tokenadp tokenadq tokenadr tokenads tokenadt tokenadu tokenadv tokenadw tokenadx tokenady tokenadz tokenaea tokenaeb tokenaec tokenaed tokenaee tokenaef tokenaeg tokenaeh tokenaei tokenaej tokenaek tokenael tokenaem tokenaen tokenaeo tokenaep tokenaeq tokenaer tokenaes tokenaet tokenaeu tokenaev tokenaew tokenaex tokenaey tokenaez tokenafa tokenafb tokenafc tokenafd tokenafe tokenaff tokenafg tokenafh tokenafi tokenafj tokenafk tokenafl tokenafm tokenafn tokenafo tokenafp tokenafq tokenafr tokenafs tokenaft tokenafu tokenafv tokenafw tokenafx tokenafy tokenafz tokenaga tokenagb tokenagc tokenagd tokenage tokenagf tokenagg tokenagh tokenagi tokenagj tokenagk tokenagl tokenagm tokenagn tokenago tokenagp tokenagq tokenagr tokenags tokenagt tokenagu tokenagv tokenagw tokenagx tokenagy tokenagz tokenaha tokenahb tokenahc tokenahd tokenahe tokenahf tokenahg tokenahh tokenahi tokenahj tokenahk tokenahl tokenahm tokenahn tokenaho tokenahp tokenahq tokenahr tokenahs tokenaht tokenahu tokenahv tokenahw tokenahx tokenahy tokenahz tokenaia tokenaib tokenaic tokenaid tokenaie tokenaif tokenaig tokenaih tokenaii tokenaij tokenaik tokenail tokenaim tokenain tokenaio tokenaip tokenaiq tokenair tokenais tokenait tokenaiu tokenaiv tokenaiw tokenaix tokenaiy tokenaiz tokenaja tokenajb tokenajc tokenajd tokenaje tokenajf tokenajg tokenajh tokenaji tokenajj tokenajk tokenajl tokenajm tokenajn tokenajo tokenajp tokenajq tokenajr tokenajs tokenajt tokenaju tokenajv tokenajw' IN NATURAL LANGUAGE MODE);
+--enable_query_log
+
+# COUNT over LIMIT can discard relevance order only when values are unobservable.
+SELECT COUNT(*) FROM (SELECT id FROM docs WHERE MATCH(body) AGAINST('database') LIMIT 2) s;
+SELECT COUNT(*) FROM (SELECT id FROM docs WHERE MATCH(body) AGAINST('database') LIMIT 0) s;
+SELECT COUNT(*) FROM (SELECT id FROM docs WHERE MATCH(body) AGAINST('database') LIMIT 2 OFFSET 1) s;
+SELECT COUNT(*) FROM (SELECT id FROM docs WHERE MATCH(body) AGAINST('database') AND id > 2 LIMIT 2) s;
+SELECT COUNT(*) FROM (SELECT id FROM docs WHERE MATCH(body) AGAINST('database') AND id > 3 LIMIT 2 OFFSET 1) s;
+SELECT id FROM docs WHERE MATCH(body) AGAINST('database') ORDER BY id DESC LIMIT 2;
+SELECT id FROM docs WHERE MATCH(body) AGAINST('database') ORDER BY id DESC LIMIT 2 OFFSET 1;
+SELECT id FROM docs WHERE MATCH(body) AGAINST('database performance')
+  ORDER BY MATCH(body) AGAINST('database performance') DESC, id LIMIT 3;
+SELECT id, ROW_NUMBER() OVER (ORDER BY MATCH(body) AGAINST('database performance') DESC, id) AS position
+  FROM docs WHERE MATCH(body) AGAINST('database performance') ORDER BY id;
+SELECT id FROM (
+  SELECT id, ROW_NUMBER() OVER (ORDER BY MATCH(body) AGAINST('database') ASC, id) AS rn
+    FROM docs WHERE MATCH(body) AGAINST('database')
+) q WHERE rn <= 1 ORDER BY id;
+SELECT COUNT(*) FROM (SELECT MATCH(body) AGAINST('database performance') AS score
+  FROM docs WHERE MATCH(body) AGAINST('database performance') LIMIT 3) s WHERE score > 0;
+
+# Reused prepared plans must evaluate each search string and score threshold.
+PREPARE search_stmt FROM 'SELECT COUNT(*) FROM docs WHERE MATCH(body) AGAINST(?) > ?';
+SET @term = 'database', @threshold = 0;
+EXECUTE search_stmt USING @term, @threshold;
+SET @term = 'audit';
+EXECUTE search_stmt USING @term, @threshold;
+SET @threshold = 1000;
+EXECUTE search_stmt USING @term, @threshold;
+SET @term = 'unmatchedtoken', @threshold = 0;
+EXECUTE search_stmt USING @term, @threshold;
+DEALLOCATE PREPARE search_stmt;
+
+UPDATE docs SET body = 'database audit updated' WHERE id = 6;
+DELETE FROM docs WHERE id = 2;
+SELECT id FROM docs WHERE MATCH(body) AGAINST('database') ORDER BY id;
+SELECT COUNT(*) FROM (SELECT id FROM docs WHERE MATCH(body) AGAINST('database') AND id > 2 LIMIT 3) s;
+
+# Partitioned retrieval must apply filters and limits across all tablets.
+CREATE TABLE partitioned_docs (
+  id INT PRIMARY KEY,
+  body TEXT,
+  FULLTEXT INDEX ft(body) WITH PARSER beng
+) PARTITION BY HASH(id) PARTITIONS 2;
+INSERT INTO partitioned_docs SELECT * FROM docs;
+SELECT id FROM partitioned_docs WHERE MATCH(body) AGAINST('database') ORDER BY id;
+SELECT COUNT(*) FROM (SELECT id FROM partitioned_docs WHERE MATCH(body) AGAINST('database') AND id > 2 LIMIT 3) s;
+SELECT COUNT(*) FROM (SELECT id FROM partitioned_docs WHERE MATCH(body) AGAINST('database') LIMIT 2 OFFSET 2) s;
+
+# Noninteger primary keys may require sorting after document-ID lookup.
+CREATE TABLE string_key_docs (
+  id VARCHAR(16) PRIMARY KEY,
+  body TEXT,
+  FULLTEXT INDEX ft(body) WITH PARSER beng
+);
+INSERT INTO string_key_docs VALUES ('z', 'database'), ('a', 'database audit'), ('m', 'database stable');
+SELECT id FROM string_key_docs WHERE MATCH(body) AGAINST('database') ORDER BY id DESC LIMIT 1;
+SELECT id FROM string_key_docs WHERE MATCH(body) AGAINST('database') ORDER BY id ASC LIMIT 1;
+SELECT COUNT(*) FROM (SELECT id FROM string_key_docs WHERE MATCH(body) AGAINST('database') AND id < 'z' LIMIT 2) s;
+
+DROP DATABASE fts_tuning_regression;
