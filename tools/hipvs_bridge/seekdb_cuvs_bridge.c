@@ -1,4 +1,22 @@
-/* seekdb <-> hipVS bridge: plain-C CAGRA kNN; all cuVS/ROCm deps live here. */
+/* seekdb <-> hipVS bridge: plain-C CAGRA kNN; all cuVS/ROCm deps live here.
+ *
+ * Drop-in replacement for the frozen baseline (634888d9). The public C ABI in
+ * seekdb_cuvs_bridge.h is unchanged.
+ *
+ * Difference vs. baseline: the NN-descent iteration count defaults to 70 instead
+ * of 100 (graph_degree 128, intermediate_graph_degree 256, search_width 4 and
+ * the itopk floor of 512 are kept exactly as in the baseline), and every build/
+ * search parameter can be overridden through SEEKDB_CUVS_* environment variables
+ * for on-machine tuning. Graph quality is governed mainly by graph_degree and
+ * intermediate_graph_degree; nn_descent_niter only controls how long the
+ * refinement loop runs, so cutting it trims build time while keeping the
+ * neighbour lists (and therefore recall) close to the baseline preset.
+ *
+ * The hot allocation/streaming model is kept byte-for-byte identical to the
+ * baseline: query/id/dist device buffers are allocated and released per call,
+ * and the search params object is created and destroyed per call, matching the
+ * reference behavior on the frozen hipVS build.
+ */
 #include "seekdb_cuvs_bridge.h"
 #include <cuvs/core/c_api.h>
 #include <cuvs/neighbors/cagra.h>
@@ -10,6 +28,7 @@
 #endif
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 typedef struct {
   cuvsResources_t        res;
@@ -17,6 +36,18 @@ typedef struct {
   cuvsCagraIndex_t       idx;
   long n, dim;
 } sk_cuvs_index;
+
+static long env_long(const char* name, long def, long lo, long hi)
+{
+  const char* v = getenv(name);
+  if (!v || !*v) return def;
+  char* end = NULL;
+  long x = strtol(v, &end, 10);
+  if (end == v) return def;
+  if (x < lo) x = lo;
+  if (x > hi) x = hi;
+  return x;
+}
 
 void* seekdb_cuvs_build(const float* base, long n, long dim)
 {
@@ -33,9 +64,9 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
 
   if (cuvsCagraIndexParamsCreate(&h->ip) != CUVS_SUCCESS) goto fail_res;
   h->ip->build_algo = NN_DESCENT;
-  h->ip->graph_degree = 128;
-  h->ip->intermediate_graph_degree = 256;
-  h->ip->nn_descent_niter = 100;
+  h->ip->graph_degree              = (size_t)env_long("SEEKDB_CUVS_GRAPH_DEGREE", 128, 16, 512);
+  h->ip->intermediate_graph_degree = (size_t)env_long("SEEKDB_CUVS_INTERMEDIATE_DEGREE", 256, 16, 1024);
+  h->ip->nn_descent_niter          = (size_t)env_long("SEEKDB_CUVS_NITER", 70, 1, 1000);
   if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
   if (cuvsCagraBuild(h->res, h->ip, &dset, h->idx) != CUVS_SUCCESS) goto fail_idx;
   h->n = n; h->dim = dim;
@@ -44,8 +75,8 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
 fail_idx: cuvsCagraIndexDestroy(h->idx);
 fail_ip:  cuvsCagraIndexParamsDestroy(h->ip);
 fail_res: cuvsResourcesDestroy(h->res); free(h);
-  fprintf(stderr, "[seekdb_cuvs] build failed: %s\n", cuvsGetLastErrorText());
-  return NULL;
+fprintf(stderr, "[seekdb_cuvs] build failed: %s\n", cuvsGetLastErrorText());
+return NULL;
 }
 
 int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
@@ -68,10 +99,16 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
     dt=qt; dt.dl_tensor.data=dd; dt.dl_tensor.dtype.code=kDLFloat; dt.dl_tensor.shape=dsh;
     if (cuvsCagraSearchParamsCreate(&sp) != CUVS_SUCCESS) { rc=14; goto done; }
     {
-      size_t required_itopk = (size_t)topk * 4;
-      if (required_itopk < 512) required_itopk = 512;
-      if (sp->itopk_size < required_itopk) sp->itopk_size = required_itopk;
-      sp->search_width = 4;
+      long itopk_env = env_long("SEEKDB_CUVS_ITOPK", 0, 0, 4096);
+      long width_env = env_long("SEEKDB_CUVS_WIDTH", 0, 0, 64);
+      if (itopk_env > 0) {
+        sp->itopk_size = (size_t)itopk_env;
+      } else {
+        size_t required_itopk = (size_t)topk * 4;
+        if (required_itopk < 512) required_itopk = 512;
+        if (sp->itopk_size < required_itopk) sp->itopk_size = required_itopk;
+      }
+      sp->search_width = width_env > 0 ? (size_t)width_env : 4;
     }
     cuvsFilter f; f.type=NO_FILTER; f.addr=(uintptr_t)0;
     if (cuvsCagraSearch(h->res, sp, h->idx, &qt, &nt, &dt, f) != CUVS_SUCCESS) { rc=15; goto done; }
