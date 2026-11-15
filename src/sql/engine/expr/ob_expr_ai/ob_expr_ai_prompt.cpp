@@ -106,9 +106,10 @@ int ObExprAIPrompt::eval_ai_prompt(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &
 
   if (OB_FAIL(tmp_allocator.eval_arg(arg0, ctx, template_datum))) {
   } else if (template_datum->is_null()) {
-    ret = OB_INVALID_ARGUMENT;
+    // A NULL template is reported as an invalid type, the same error code as an
+    // unsupported argument type of the operator.
+    ret = OB_ERR_INVALID_TYPE_FOR_OP;
     LOG_WARN("invalid template argument", K(ret), K(arg0->datum_meta_.type_));
-    LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_prompt, template is null");
   } else if (OB_FAIL(ObTextStringHelper::get_string(ctx.exec_ctx_, expr, tmp_allocator,
                                                     ObExprAIPrompt::TEMPLATE_IDX, template_datum, template_str))) {
   }
@@ -123,9 +124,9 @@ int ObExprAIPrompt::eval_ai_prompt(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &
       ObJsonString *arg_json_str = NULL;
       if (OB_FAIL(tmp_allocator.eval_arg(arg, ctx, datum))) {
       } else if (datum->is_null()) {
-        ret = OB_INVALID_ARGUMENT;
+        // A NULL argument follows the same error path as an unsupported type.
+        ret = OB_ERR_INVALID_TYPE_FOR_OP;
         LOG_WARN("invalid null argument", K(ret), K(i));
-        LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_prompt, argument is null");
       } else if (ob_is_json(arg->datum_meta_.type_)) {
         // JSON argument, the JSON document is appended as it is so that JSON
         // arrays/objects and nested AI_PROMPT objects keep their structure.
@@ -133,9 +134,8 @@ int ObExprAIPrompt::eval_ai_prompt(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &
         bool is_json_null = false;
         if (OB_FAIL(ObJsonExprHelper::get_json_doc(expr, ctx, tmp_allocator, i, j_base, is_json_null))) {
         } else if (is_json_null || OB_ISNULL(j_base)) {
-          ret = OB_INVALID_ARGUMENT;
+          ret = OB_ERR_INVALID_TYPE_FOR_OP;
           LOG_WARN("invalid json null argument", K(ret), K(i));
-          LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_prompt, json argument is null");
         } else if (OB_FAIL(args_array->append(static_cast<ObJsonNode *>(j_base)->clone(&tmp_allocator, true)))) {
         }
       } else if (ob_is_string_tc(arg->datum_meta_.type_) || is_ai_prompt_text_type(arg->datum_meta_.type_)) {
