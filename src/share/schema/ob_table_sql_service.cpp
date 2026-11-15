@@ -1139,6 +1139,8 @@ int ObTableSqlService::batch_add_columns_for_create_table(common::ObISQLClient &
     time_guard.click("generate_dml") ;
     if (FAILEDx(exec_dml(sql_client, OB_ALL_COLUMN_TNAME, dml, column_count))) {
     } else if (FALSE_IT(time_guard.click("insert_all_column"))) {
+    } else if (OB_FAIL(insert_ai_column_metadata(sql_client, tables))) {
+
     } else if (OB_FAIL(dml.set_default_columns("is_deleted", "0"))) {
     } else if (OB_FAIL(exec_dml(sql_client, OB_ALL_COLUMN_HISTORY_TNAME, dml, column_count))) {
     } else if (FALSE_IT(time_guard.click("insert_all_column_history"))) {
@@ -1147,6 +1149,278 @@ int ObTableSqlService::batch_add_columns_for_create_table(common::ObISQLClient &
   return ret;
 }
 
+
+
+namespace ai_column_internal
+{
+// The AI column definition is stored as a small JSON object in the column
+// comment, so it travels with the schema without adding column fields.
+inline bool is_ai_column(const ObColumnSchemaV2 &column)
+{
+  const ObString comment = column.get_comment_str();
+  return comment.length() > 0 && nullptr != strstr(comment.ptr(), "\"ai_column\":1");
+}
+
+inline int64_t parse_int_field(const ObString &comment, const char *key, const int64_t def_val)
+{
+  int64_t value = def_val;
+  const char *pos = (comment.length() > 0) ? strstr(comment.ptr(), key) : nullptr;
+  if (nullptr != pos) {
+    value = atoll(pos + strlen(key));
+  }
+  return value;
+}
+
+inline ObString parse_str_field(const ObString &comment, const char *key)
+{
+  ObString value;
+  const char *pos = (comment.length() > 0) ? strstr(comment.ptr(), key) : nullptr;
+  if (nullptr != pos) {
+    const char *start = pos + strlen(key);
+    const char *end = strchr(start, '"');
+    if (nullptr != end) {
+      value.assign_ptr(const_cast<char *>(start), static_cast<int32_t>(end - start));
+    }
+  }
+  return value;
+}
+
+inline uint64_t find_hidden_column_id(const ObTableSchema &table, const char *prefix, const ObString &col_name)
+{
+  uint64_t id = OB_INVALID_ID;
+  char name_buf[OB_MAX_COLUMN_NAME_LENGTH];
+  int64_t name_len = snprintf(name_buf, sizeof(name_buf), "%s%.*s", prefix,
+                              col_name.length(), col_name.ptr());
+  if (name_len > 0 && name_len < static_cast<int64_t>(sizeof(name_buf))) {
+    const ObString wanted(static_cast<int32_t>(name_len), name_buf);
+    for (ObTableSchema::const_column_iterator iter = table.column_begin();
+         OB_INVALID_ID == id && iter != table.column_end(); ++iter) {
+      const ObColumnSchemaV2 *c = *iter;
+      if (OB_NOT_NULL(c) && c->get_column_name_str() == wanted) {
+        id = c->get_column_id();
+      }
+    }
+  }
+  return id;
+}
+} // namespace ai_column_internal
+
+
+int ObTableSqlService::insert_ai_column_metadata(ObISQLClient &sql_client,
+                                                 const ObTableSchema &table,
+                                                 const ObColumnSchemaV2 &column)
+{
+  int ret = OB_SUCCESS;
+  share::ObDMLSqlSplicer dml;
+  const ObString comment = column.get_comment_str();
+  const ObString col_name = column.get_column_name_str();
+  if (!ai_column_internal::is_ai_column(column) || table.is_view_table()) {
+  } else {
+    const int64_t max_retries = ai_column_internal::parse_int_field(comment, "\"max_retries\":", 0);
+    const ObString sync_mode = ai_column_internal::parse_str_field(comment, "\"sync_mode\":\"");
+    const ObString normalized = ai_column_internal::parse_str_field(comment, "\"normalized_expr\":\"");
+    const ObString expression = ai_column_internal::parse_str_field(comment, "\"expression\":\"");
+    const ObString dependencies = ai_column_internal::parse_str_field(comment, "\"dependencies\":\"");
+    const uint64_t state_id = ai_column_internal::find_hidden_column_id(table, "__ai_state_", col_name);
+    const uint64_t request_id = ai_column_internal::find_hidden_column_id(table, "__ai_request_", col_name);
+    const uint64_t spec_id = ai_column_internal::find_hidden_column_id(table, "__ai_spec_", col_name);
+    if (OB_FAIL(dml.add_pk_column("table_id", ObSchemaUtils::get_extract_schema_id(table.get_table_id())))
+        || OB_FAIL(dml.add_pk_column("column_id", column.get_column_id()))
+        || OB_FAIL(dml.add_column("column_name", ObHexEscapeSqlStr(col_name)))
+        || OB_FAIL(dml.add_column("sync_mode", ObHexEscapeSqlStr(sync_mode)))
+        || OB_FAIL(dml.add_column("max_retries", max_retries))
+        || OB_FAIL(dml.add_column("state_column_id", static_cast<int64_t>(state_id)))
+        || OB_FAIL(dml.add_column("request_column_id", static_cast<int64_t>(request_id)))
+        || OB_FAIL(dml.add_column("result_spec_column_id", static_cast<int64_t>(spec_id)))
+        || OB_FAIL(dml.add_column("normalized_expr", ObHexEscapeSqlStr(normalized)))
+        || OB_FAIL(dml.add_column("expression", ObHexEscapeSqlStr(expression)))
+        || OB_FAIL(dml.add_column("dependencies", ObHexEscapeSqlStr(dependencies)))
+        || OB_FAIL(dml.add_column("definition_version", 1))
+        || OB_FAIL(dml.add_gmt_create())
+        || OB_FAIL(dml.add_gmt_modified())) {
+    } else if (OB_FAIL(exec_dml(sql_client, OB_ALL_AI_COLUMN_TNAME, dml, 1, true /*insert_ignore*/))) {
+    }
+  }
+  return ret;
+}
+
+
+int ObTableSqlService::insert_ai_column_metadata_for_table(ObISQLClient &sql_client,
+                                                          const ObTableSchema &table)
+{
+  int ret = OB_SUCCESS;
+  share::ObDMLSqlSplicer dml;
+  int64_t row_count = 0;
+  if (table.is_view_table() || is_core_table(table.get_table_id())) {
+  } else {
+    for (ObTableSchema::const_column_iterator iter = table.column_begin();
+         OB_SUCC(ret) && iter != table.column_end(); ++iter) {
+      const ObColumnSchemaV2 *column = *iter;
+      if (OB_ISNULL(column)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (!ai_column_internal::is_ai_column(*column)) {
+      } else {
+        const ObString comment = column->get_comment_str();
+        const ObString col_name = column->get_column_name_str();
+        const int64_t max_retries = ai_column_internal::parse_int_field(comment, "\"max_retries\":", 0);
+        const ObString sync_mode = ai_column_internal::parse_str_field(comment, "\"sync_mode\":\"");
+        const ObString normalized = ai_column_internal::parse_str_field(comment, "\"normalized_expr\":\"");
+        const ObString expression = ai_column_internal::parse_str_field(comment, "\"expression\":\"");
+        const ObString dependencies = ai_column_internal::parse_str_field(comment, "\"dependencies\":\"");
+        const uint64_t state_id = ai_column_internal::find_hidden_column_id(table, "__ai_state_", col_name);
+        const uint64_t request_id = ai_column_internal::find_hidden_column_id(table, "__ai_request_", col_name);
+        const uint64_t spec_id = ai_column_internal::find_hidden_column_id(table, "__ai_spec_", col_name);
+        if (OB_FAIL(dml.add_pk_column("table_id", ObSchemaUtils::get_extract_schema_id(table.get_table_id())))
+            || OB_FAIL(dml.add_pk_column("column_id", column->get_column_id()))
+            || OB_FAIL(dml.add_column("column_name", ObHexEscapeSqlStr(col_name)))
+            || OB_FAIL(dml.add_column("sync_mode", ObHexEscapeSqlStr(sync_mode)))
+            || OB_FAIL(dml.add_column("max_retries", max_retries))
+            || OB_FAIL(dml.add_column("state_column_id", static_cast<int64_t>(state_id)))
+            || OB_FAIL(dml.add_column("request_column_id", static_cast<int64_t>(request_id)))
+            || OB_FAIL(dml.add_column("result_spec_column_id", static_cast<int64_t>(spec_id)))
+            || OB_FAIL(dml.add_column("normalized_expr", ObHexEscapeSqlStr(normalized)))
+            || OB_FAIL(dml.add_column("expression", ObHexEscapeSqlStr(expression)))
+            || OB_FAIL(dml.add_column("dependencies", ObHexEscapeSqlStr(dependencies)))
+            || OB_FAIL(dml.add_column("definition_version", 1))
+            || OB_FAIL(dml.add_gmt_create())
+            || OB_FAIL(dml.add_gmt_modified())) {
+        } else if (OB_FAIL(dml.finish_row())) {
+        } else {
+          ++row_count;
+        }
+      }
+    }
+  }
+  if (OB_SUCC(ret) && row_count > 0) {
+    if (OB_FAIL(exec_dml(sql_client, OB_ALL_AI_COLUMN_TNAME, dml, row_count, true /*insert_ignore*/))) {
+    }
+  }
+  return ret;
+}
+
+int ObTableSqlService::check_ai_column_dependency(const ObTableSchema &table)
+{
+  int ret = OB_SUCCESS;
+  for (ObTableSchema::const_column_iterator iter = table.column_begin();
+       OB_SUCC(ret) && iter != table.column_end(); ++iter) {
+    const ObColumnSchemaV2 *column = *iter;
+    if (OB_ISNULL(column) || !ai_column_internal::is_ai_column(*column)) {
+    } else {
+      const ObString deps = ai_column_internal::parse_str_field(column->get_comment_str(),
+                                                               "\"dependencies\":\"");
+      if (deps.length() <= 0) {
+      } else {
+        for (ObTableSchema::const_column_iterator other = table.column_begin();
+             OB_SUCC(ret) && other != table.column_end(); ++other) {
+          const ObColumnSchemaV2 *other_column = *other;
+          if (OB_ISNULL(other_column) || other_column == column
+              || !ai_column_internal::is_ai_column(*other_column)) {
+          } else {
+            const ObString other_name = other_column->get_column_name_str();
+            // the dependency list is a comma separated list of column names
+            const char *hay = deps.ptr();
+            const char *hit = strstr(hay, other_name.ptr());
+            if (nullptr != hit
+                && (hit == hay || ',' == *(hit - 1))
+                && (hit + other_name.length() == hay + deps.length()
+                    || ',' == *(hit + other_name.length()))) {
+              ret = OB_NOT_SUPPORTED;
+              LOG_WARN("ai column dependency", K(ret), K(column->get_column_name_str()),
+                       K(other_name));
+            }
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int ObTableSqlService::check_ai_column_dimension(const ObTableSchema &table)
+{
+  int ret = OB_SUCCESS;
+  for (ObTableSchema::const_column_iterator iter = table.column_begin();
+       OB_SUCC(ret) && iter != table.column_end(); ++iter) {
+    const ObColumnSchemaV2 *column = *iter;
+    if (OB_ISNULL(column) || !ai_column_internal::is_ai_column(*column)) {
+    } else {
+      const ObString comment = column->get_comment_str();
+      const int64_t marker_dim = ai_column_internal::parse_int_field(comment, "\"dim\":", 0);
+      int64_t col_dim = 0;
+      const ObIArray<ObString> &ext = column->get_extended_type_info();
+      if (ext.count() > 0) {
+        const char *lp = strchr(ext.at(0).ptr(), '(');
+        if (nullptr != lp) {
+          col_dim = strtoll(lp + 1, nullptr, 10);
+        }
+      }
+      if (marker_dim > 0 && col_dim > 0 && marker_dim != col_dim) {
+        ret = OB_ERR_AI_COLUMN_DIM_MISMATCH;
+        LOG_USER_ERROR(OB_ERR_AI_COLUMN_DIM_MISMATCH, static_cast<int>(col_dim), static_cast<int>(marker_dim));
+        LOG_WARN("ai column dimension mismatch", K(ret), K(marker_dim), K(col_dim),
+                 K(column->get_column_name_str()));
+      }
+    }
+  }
+  return ret;
+}
+
+int ObTableSqlService::insert_ai_column_metadata(ObISQLClient &sql_client,
+                                                 const ObIArray<ObTableSchema> &tables)
+{
+  int ret = OB_SUCCESS;
+  share::ObDMLSqlSplicer dml;
+  int64_t row_count = 0;
+  for (int64_t i = 0; OB_SUCC(ret) && i < tables.count(); ++i) {
+    const ObTableSchema &table = tables.at(i);
+    LOG_INFO("ai column metadata scan", K(ret), K(table.get_table_id()), K(table.get_column_count()));
+    if (table.is_view_table() || is_core_table(table.get_table_id())) {
+    } else {
+      for (ObTableSchema::const_column_iterator iter = table.column_begin();
+           OB_SUCC(ret) && iter != table.column_end(); ++iter) {
+        const ObColumnSchemaV2 *column = *iter;
+        if (OB_ISNULL(column)) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (!ai_column_internal::is_ai_column(*column)) {
+        } else {
+          const ObString comment = column->get_comment_str();
+          const ObString col_name = column->get_column_name_str();
+          const int64_t max_retries = ai_column_internal::parse_int_field(comment, "\"max_retries\":", 0);
+          const ObString sync_mode = ai_column_internal::parse_str_field(comment, "\"sync_mode\":\"");
+          const ObString normalized = ai_column_internal::parse_str_field(comment, "\"normalized_expr\":\"");
+          const ObString expression = ai_column_internal::parse_str_field(comment, "\"expression\":\"");
+          const ObString dependencies = ai_column_internal::parse_str_field(comment, "\"dependencies\":\"");
+          const uint64_t state_id = ai_column_internal::find_hidden_column_id(table, "__ai_state_", col_name);
+          const uint64_t request_id = ai_column_internal::find_hidden_column_id(table, "__ai_request_", col_name);
+          const uint64_t spec_id = ai_column_internal::find_hidden_column_id(table, "__ai_spec_", col_name);
+          if (OB_FAIL(dml.add_pk_column("table_id", ObSchemaUtils::get_extract_schema_id(table.get_table_id())))
+              || OB_FAIL(dml.add_pk_column("column_id", column->get_column_id()))
+              || OB_FAIL(dml.add_column("column_name", ObHexEscapeSqlStr(col_name)))
+              || OB_FAIL(dml.add_column("sync_mode", ObHexEscapeSqlStr(sync_mode)))
+              || OB_FAIL(dml.add_column("max_retries", max_retries))
+              || OB_FAIL(dml.add_column("state_column_id", static_cast<int64_t>(state_id)))
+              || OB_FAIL(dml.add_column("request_column_id", static_cast<int64_t>(request_id)))
+              || OB_FAIL(dml.add_column("result_spec_column_id", static_cast<int64_t>(spec_id)))
+              || OB_FAIL(dml.add_column("normalized_expr", ObHexEscapeSqlStr(normalized)))
+              || OB_FAIL(dml.add_column("expression", ObHexEscapeSqlStr(expression)))
+              || OB_FAIL(dml.add_column("dependencies", ObHexEscapeSqlStr(dependencies)))
+              || OB_FAIL(dml.add_column("definition_version", 1))
+              || OB_FAIL(dml.add_gmt_create())
+              || OB_FAIL(dml.add_gmt_modified())) {
+          } else if (OB_FAIL(dml.finish_row())) {
+          } else {
+            ++row_count;
+          }
+        }
+      }
+    }
+  }
+  if (OB_SUCC(ret) && row_count > 0) {
+    if (OB_FAIL(exec_dml(sql_client, OB_ALL_AI_COLUMN_TNAME, dml, row_count))) {
+    }
+  }
+  return ret;
+}
 
 int ObTableSqlService::add_columns_for_not_core(ObISQLClient &sql_client,
                                                 const ObTableSchema &table)
@@ -1162,8 +1436,16 @@ int ObTableSqlService::add_columns_for_not_core(ObISQLClient &sql_client,
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("column count not match", KR(ret), K(column_count), K(table.get_column_count()));
   } else if (OB_FAIL(exec_dml(sql_client, OB_ALL_COLUMN_TNAME, dml, column_count))) {
-  } else if (OB_FAIL(dml.set_default_columns("is_deleted", "0"))) {
-  } else if (OB_FAIL(exec_dml(sql_client, OB_ALL_COLUMN_HISTORY_TNAME, dml, column_count))) {
+  } else {
+    ObSEArray<ObTableSchema, 1> ai_tables;
+    if (OB_FAIL(ai_tables.push_back(table))) {
+    } else if (OB_FAIL(insert_ai_column_metadata(sql_client, ai_tables))) {
+    }
+  }
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(dml.set_default_columns("is_deleted", "0"))) {
+    } else if (OB_FAIL(exec_dml(sql_client, OB_ALL_COLUMN_HISTORY_TNAME, dml, column_count))) {
+    }
   }
   return ret;
 }
@@ -2086,6 +2368,14 @@ int ObTableSqlService::batch_create_table(ObIArray<ObTableSchema> &tables,
     const bool is_truncate_table)
 {
   int ret = OB_SUCCESS;
+  // ai column dimension check in create
+  for (int64_t i = 0; OB_SUCC(ret) && i < tables.count(); ++i) {
+    if (OB_FAIL(check_ai_column_dependency(tables.at(i)))) {
+    } else if (OB_FAIL(check_ai_column_dimension(tables.at(i)))) {
+      LOG_WARN("ai column dimension mismatch", K(ret), K(i));
+    }
+  }
+
   common::ObTimeGuard time_guard("batch_create_table", 10_ms);
   int64_t start_usec = ObTimeUtility::current_time();
   int64_t end_usec = 0;

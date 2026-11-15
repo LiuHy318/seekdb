@@ -420,6 +420,7 @@ END_P SET_VAR DELIMITER
 %type <node> opt_float_precision opt_number_precision
 %type <node> opt_equal_mark opt_default_mark read_only_or_write not not2
 %type <node> int_or_decimal
+%type <node> ai_column_with_clause ai_column_option ai_column_option_list
 %type <node> opt_column_attribute_list column_attribute column_attribute_list opt_column_default_value opt_column_default_value_list
 %type <node> show_stmt from_or_in columns_or_fields database_or_schema index_or_indexes_or_keys opt_from_or_in_database_clause opt_show_condition opt_desc_column_option opt_status opt_storage opt_show_engine check_table_options check_table_option
 %type <node> prepare_stmt stmt_name preparable_stmt
@@ -6139,7 +6140,11 @@ column_attribute_list column_attribute
 }
 
 column_attribute:
-not NULLX
+AI COLUMN '(' expr ')' ai_column_with_clause
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_CONSTR_AI_COLUMN, 2, $4, $6);
+}
+| not NULLX
 {
   (void)($1) ;
   (void)($2) ; /* make bison mute */
@@ -18433,6 +18438,36 @@ ACCESSIBLE
 | XOR
 | YEAR_MONTH
 | ZEROFILL
+/* AI column support: col <type> AI COLUMN (<ai expr>) [WITH (<options>)] */
+ai_column_with_clause:
+WITH '(' ai_column_option_list ')'
+{
+  $$ = $3;
+}
+| /* empty */
+{
+  $$ = NULL;
+}
+;
+
+ai_column_option_list:
+ai_column_option_list ',' ai_column_option
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+| ai_column_option
+{
+  $$ = $1;
+}
+;
+
+ai_column_option:
+NAME_OB COMP_EQ literal
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_OPTION, 2, $1, $3);
+}
+;
+
 %%
 ////////////////////////////////////////////////////////////////
 void yyerror(void *yylloc, ParseResult *p, char *s, ...)
