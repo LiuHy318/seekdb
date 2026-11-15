@@ -128,6 +128,9 @@ int ObExprAIRerank::eval_ai_rerank(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &
     ObIJsonBase *j_base = nullptr;
     int64_t batch_size = 20; // max batch size for rerank
     bool is_null_result = false;
+    // A NULL doc_key means the documents are plain strings, it is the same as
+    // the three argument form of AI_RERANK.
+    const bool has_doc_key = OB_NOT_NULL(arg_doc_key) && !arg_doc_key->is_null();
     if (OB_FAIL(ObJsonExprHelper::get_json_doc(expr, ctx, temp_allocator, DOCUMENTS_IDX,
           j_base, is_null_result))) {
     } else if (OB_ISNULL(j_base)) {
@@ -150,11 +153,11 @@ int ObExprAIRerank::eval_ai_rerank(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &
         if (OB_ISNULL(doc_node)) {
           ret = OB_ERR_UNEXPECTED;
           LOG_WARN("doc_node is null", K(ret));
-        } else if (OB_NOT_NULL(arg_doc_key) && doc_node->json_type() != ObJsonNodeType::J_OBJECT) {
+        } else if (has_doc_key && doc_node->json_type() != ObJsonNodeType::J_OBJECT) {
           ret = OB_INVALID_ARGUMENT;
           LOG_WARN("doc_node is not object", K(ret));
           LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_rerank, document_array element is not object");
-        } else if (OB_ISNULL(arg_doc_key) && doc_node->json_type() != ObJsonNodeType::J_STRING) {
+        } else if (!has_doc_key && doc_node->json_type() != ObJsonNodeType::J_STRING) {
           ret = OB_INVALID_ARGUMENT;
           LOG_WARN("doc_node is not string", K(ret));
           LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_rerank, document_array element is not string");
@@ -176,7 +179,7 @@ int ObExprAIRerank::eval_ai_rerank(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("info is null", K(ret));
     } else if (OB_FAIL(ObAIFuncUtils::check_info_type_rerank(info))) {
-    } else if (OB_NOT_NULL(arg_doc_key)) {
+    } else if (has_doc_key) {
       ObString doc_key = arg_doc_key->get_string();
       if (OB_FAIL(eval_ai_rerank_with_doc_key(expr, ctx, temp_allocator, model_id,
                   query, document_array, doc_key, *info, *endpoint_info, res))) {
@@ -623,8 +626,8 @@ int ObExprAIRerank::construct_config_json(ObIAllocator &allocator, int64_t top_n
 }
 
 int ObExprAIRerank::cg_expr(ObExprCGCtx &expr_cg_ctx,
-                        const ObRawExpr &raw_expr,
-                        ObExpr &rt_expr) const
+                            const ObRawExpr &raw_expr,
+                            ObExpr &rt_expr) const
 {
   int ret = OB_SUCCESS;
   // TODO: support schema version match in plan cache for ai func
@@ -635,8 +638,8 @@ int ObExprAIRerank::cg_expr(ObExprCGCtx &expr_cg_ctx,
   //     OB_NOT_NULL(expr_cg_ctx.schema_guard_)) {
   //   ObIAllocator *allocator = expr_cg_ctx.allocator_;
   //   ObExecContext *exec_ctx = expr_cg_ctx.session_->get_cur_exec_ctx();
-  //   bool got_data = false;
   //   ObObj const_data;
+  //   bool got_data = false;
   //   ObAIFuncExprInfo *info = nullptr;
   //   if (OB_ISNULL(allocator)) {
   //     ret = OB_ERR_UNEXPECTED;
@@ -648,16 +651,10 @@ int ObExprAIRerank::cg_expr(ObExprCGCtx &expr_cg_ctx,
   //                                                         *allocator))) {
   //     LOG_WARN("failed to calc offset expr", K(ret));
   //   } else if (!got_data || const_data.is_null()) {
+  //   } else if (OB_FAIL(ObAIFuncUtils::get_ai_func_info(*allocator, const_data.get_string(), *expr_cg_ctx.schema_guard_, info))) {
+  //     LOG_WARN("failed to get ai func info", K(ret), K(const_data.get_string()));
   //   } else {
-  //     ObAIFuncExprInfo *info = OB_NEWx(ObAIFuncExprInfo, allocator, *allocator, T_FUN_SYS_AI_RERANK);
-  //     if (OB_ISNULL(info)) {
-  //       ret = OB_ALLOCATE_MEMORY_FAILED;
-  //       LOG_WARN("failed to allocate memory for ai rerank info", K(ret));
-  //     } else if (OB_FAIL(ObAIFuncUtils::get_ai_func_info(*allocator, const_data.get_string(), *expr_cg_ctx.schema_guard_, info))) {
-  //       LOG_WARN("failed to get ai func info", K(ret), K(const_data.get_string()));
-  //     } else {
-  //       rt_expr.extra_info_ = info;
-  //     }
+  //     rt_expr.extra_info_ = info;
   //   }
   // }
   if (OB_SUCC(ret)) {
