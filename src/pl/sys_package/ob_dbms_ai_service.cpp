@@ -33,6 +33,42 @@ namespace oceanbase
 namespace pl
 {
 
+namespace
+{
+// Creating/dropping AI models is executed through the process wide Root Service
+// serialization lock, and both the lock acquisition and the schema publish
+// behind it are bounded by the caller's worker deadline. Measured against the
+// default 10s ob_query_timeout that deadline is far too small: while another
+// Root Service call is still publishing a schema version, even a no-op
+// "model does not exist" statement ends up as 4012 (OB_TIMEOUT). Give the
+// serialized section a longer, but still bounded, deadline.
+const int64_t AI_MODEL_DDL_TIMEOUT_US = 30LL * 1000LL * 1000LL;
+
+class ObAiModelDdlTimeoutGuard
+{
+public:
+  ObAiModelDdlTimeoutGuard()
+    : saved_timeout_ts_(THIS_WORKER.get_timeout_ts()), changed_(false)
+  {
+    int64_t extended_timeout_ts = ObTimeUtility::current_time() + AI_MODEL_DDL_TIMEOUT_US;
+    if (extended_timeout_ts > saved_timeout_ts_) {
+      THIS_WORKER.set_timeout_ts(extended_timeout_ts);
+      changed_ = true;
+    }
+  }
+  ~ObAiModelDdlTimeoutGuard()
+  {
+    if (changed_) {
+      THIS_WORKER.set_timeout_ts(saved_timeout_ts_);
+    }
+  }
+private:
+  int64_t saved_timeout_ts_;
+  bool changed_;
+  DISALLOW_COPY_AND_ASSIGN(ObAiModelDdlTimeoutGuard);
+};
+} // namespace
+
 int ObDBMSAiService::check_ai_model_privilege_(ObPLExecCtx &ctx, ObPrivSet required_priv)
 {
   int ret = OB_SUCCESS;
@@ -296,8 +332,11 @@ int ObDBMSAiService::create_ai_model(ObPLExecCtx &ctx, sql::ParamStore &params, 
       } else if (OB_ISNULL(root_commands)) {
         ret = OB_NOT_INIT;
         LOG_WARN("root command service is not initialized", K(ret));
-      } else if (OB_FAIL(query::serialize_root_service_call(
-                           [&]{ return root_commands->create_ai_model(arg); }))) {
+      } else {
+        ObAiModelDdlTimeoutGuard timeout_guard;
+        if (OB_FAIL(query::serialize_root_service_call(
+                     [&]{ return root_commands->create_ai_model(arg); }))) {
+        }
       }
     }
 
@@ -351,9 +390,12 @@ int ObDBMSAiService::drop_ai_model(ObPLExecCtx &ctx, sql::ParamStore &params, co
       if (OB_ISNULL(root_commands)) {
         ret = OB_NOT_INIT;
         LOG_WARN("root command service is not initialized", K(ret));
-      } else if (OB_FAIL(query::serialize_root_service_call(
-                           [&]{ return root_commands->drop_ai_model(arg); }))) {
-    }
+      } else {
+        ObAiModelDdlTimeoutGuard timeout_guard;
+        if (OB_FAIL(query::serialize_root_service_call(
+                     [&]{ return root_commands->drop_ai_model(arg); }))) {
+        }
+      }
 
     LOG_INFO("finished to drop ai model", K(ret), K(params), K(model_name));
   }
