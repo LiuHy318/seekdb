@@ -37,13 +37,15 @@ namespace
 {
 // Every DBMS_AI_SERVICE DDL runs on the caller's worker deadline, which is the
 // session's ob_query_timeout (10s by default). That deadline is far too small
-// for this path: model DDL is serialized on a process wide Root Service lock and
-// the publish behind it reads the schema version from an inner table, so on a
-// busy or freshly started instance the first DDL of a session regularly ends up
-// as 4012 (OB_TIMEOUT) - even for a "model does not exist" no-op that should have
-// returned 11118 at once. Bound every procedure body with a much longer, still
-// finite deadline and restore the original one before returning.
-const int64_t AI_MODEL_DDL_TIMEOUT_US = 60LL * 1000LL * 1000LL;
+// for this path: dropping or creating an existing model goes through the process
+// wide Root Service serialization lock, an inner table read of
+// __all_schema_version, an inner SQL transaction and then publish_schema(), and
+// all of those are bounded by the same worker deadline. On a busy or shared
+// instance the schema publish alone can far exceed 10s, so the statement ends up
+// as 4012 (OB_TIMEOUT) although nothing is wrong with the AI function logic.
+// Bound every procedure body with a much longer, still finite deadline and
+// restore the original one before returning.
+const int64_t AI_MODEL_DDL_TIMEOUT_US = 300LL * 1000LL * 1000LL;
 
 class ObAiModelDdlTimeoutGuard
 {
