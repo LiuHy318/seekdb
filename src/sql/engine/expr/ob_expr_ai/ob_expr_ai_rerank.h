@@ -54,11 +54,19 @@ private:
                                          common::ObString &model_id, common::ObString &query, common::ObJsonArray *document_array,
                                          common::ObString &doc_key, const common::ObAIFuncExprInfo &info, const share::ObAiModelEndpointInfo &endpoint_info, ObDatum &res);
   static int get_doc_array_from_documents_array_with_key(ObIAllocator &allocator, ObJsonArray *document_object_array, ObString &doc_key, ObJsonArray *&doc_array);
-  static int sort_document_array_by_model_result(common::ObIAllocator &allocator, common::ObJsonArray *document_array, common::ObJsonArray *model_result_array, common::ObJsonArray *&sorted_document_array);
   static int construct_config_json(common::ObIAllocator &allocator, int64_t top_k, int64_t return_doc, common::ObJsonObject *&config_json);
   static int construct_batch_document_array(common::ObIAllocator &allocator, common::ObJsonArray *document_array, int64_t start_idx, int64_t end_idx, common::ObJsonArray *&batch_document_array);
   static int batch_result_add_base(common::ObIAllocator &allocator, common::ObJsonArray *array, int64_t start_idx);
-  static int compact_json_array_by_key(common::ObIAllocator &allocator, common::ObJsonArray *array1, common::ObJsonArray *array2, common::ObString &score_key, common::ObJsonArray *&compact_array);
+  // Check that the model returns exactly %expected_count results, each of them
+  // carries a unique index inside [0, expected_count) and a numeric score.
+  static int validate_rerank_result(common::ObJsonArray *result_array, int64_t expected_count);
+  // Build the final result which is ordered by relevance score in descending
+  // order. Rows with the same score keep their original index order, so the
+  // ordering is stable.
+  static int sort_rerank_result(common::ObIAllocator &allocator, common::ObJsonArray *result_array, common::ObJsonArray *&sorted_array);
+  // Attach the score of every document to the original document object.
+  static int attach_score_to_documents(common::ObIAllocator &allocator, common::ObJsonArray *document_array,
+                                       common::ObJsonArray *sorted_result_array, common::ObJsonArray *&sorted_document_array);
   static constexpr int MODEL_IDX = 0;
   static constexpr int QUERY_IDX = 1;
   static constexpr int DOCUMENTS_IDX = 2;
