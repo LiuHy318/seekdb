@@ -36,6 +36,7 @@ public:
   static int eval_ai_prompt(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &res);
   virtual int cg_expr(ObExprCGCtx &expr_cg_ctx, const ObRawExpr &raw_expr,
                   ObExpr &rt_expr) const override;
+  static constexpr int TEMPLATE_IDX = 0;
 private:
   DISALLOW_COPY_AND_ASSIGN(ObExprAIPrompt);
 };

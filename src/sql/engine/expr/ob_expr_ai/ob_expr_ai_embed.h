@@ -37,6 +37,10 @@ public:
                                 int64_t param_num,
                                 common::ObExprTypeCtx &type_ctx) const override;
   static int eval_ai_embed(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &res);
+  // Batch (cross-row) evaluation: all the rows of one batch are embedded with
+  // a single request, so that a table scan does not send one request per row.
+  static int eval_ai_embed_batch(const ObExpr &expr, ObEvalCtx &ctx,
+                                 const ObBitVector &skip, const int64_t size);
   virtual int cg_expr(ObExprCGCtx &expr_cg_ctx,
                       const ObRawExpr &raw_expr,
                       ObExpr &rt_expr) const override;
@@ -45,6 +49,8 @@ private:
   static constexpr int MODEL_IDX = 0;
   static constexpr int CONTENT_IDX = 1;
   static constexpr int DIM_IDX = 2;
+  // The maximum number of inputs carried by one embedding request.
+  static constexpr int64_t MAX_EMBED_BATCH_SIZE = 10;
   DISALLOW_COPY_AND_ASSIGN(ObExprAIEmbed);
 };
 
