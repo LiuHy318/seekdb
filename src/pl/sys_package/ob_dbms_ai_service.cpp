@@ -35,14 +35,15 @@ namespace pl
 
 namespace
 {
-// Creating/dropping AI models is executed through the process wide Root Service
-// serialization lock, and both the lock acquisition and the schema publish
-// behind it are bounded by the caller's worker deadline. Measured against the
-// default 10s ob_query_timeout that deadline is far too small: while another
-// Root Service call is still publishing a schema version, even a no-op
-// "model does not exist" statement ends up as 4012 (OB_TIMEOUT). Give the
-// serialized section a longer, but still bounded, deadline.
-const int64_t AI_MODEL_DDL_TIMEOUT_US = 30LL * 1000LL * 1000LL;
+// Every DBMS_AI_SERVICE DDL runs on the caller's worker deadline, which is the
+// session's ob_query_timeout (10s by default). That deadline is far too small
+// for this path: model DDL is serialized on a process wide Root Service lock and
+// the publish behind it reads the schema version from an inner table, so on a
+// busy or freshly started instance the first DDL of a session regularly ends up
+// as 4012 (OB_TIMEOUT) - even for a "model does not exist" no-op that should have
+// returned 11118 at once. Bound every procedure body with a much longer, still
+// finite deadline and restore the original one before returning.
+const int64_t AI_MODEL_DDL_TIMEOUT_US = 60LL * 1000LL * 1000LL;
 
 class ObAiModelDdlTimeoutGuard
 {
@@ -128,6 +129,7 @@ int ObDBMSAiService::check_ai_model_privilege_(ObPLExecCtx &ctx, ObPrivSet requi
 int ObDBMSAiService::create_ai_model_endpoint(ObPLExecCtx &ctx, sql::ParamStore &params, common::ObObj &result)
 {
   int ret = OB_SUCCESS;
+  ObAiModelDdlTimeoutGuard timeout_guard;
   ObString endpoint_name;
   query::ObIAiEndpointAdmin *endpoint_admin = ctx.ai_endpoint_admin_;
   ctx.set_is_sensitive(true);
@@ -170,6 +172,7 @@ int ObDBMSAiService::create_ai_model_endpoint(ObPLExecCtx &ctx, sql::ParamStore 
 int ObDBMSAiService::alter_ai_model_endpoint(ObPLExecCtx &ctx, sql::ParamStore &params, common::ObObj &result)
 {
   int ret = OB_SUCCESS;
+  ObAiModelDdlTimeoutGuard timeout_guard;
   ObString endpoint_name;
   query::ObIAiEndpointAdmin *endpoint_admin = ctx.ai_endpoint_admin_;
 
@@ -210,6 +213,7 @@ int ObDBMSAiService::alter_ai_model_endpoint(ObPLExecCtx &ctx, sql::ParamStore &
 int ObDBMSAiService::drop_ai_model_endpoint(ObPLExecCtx &ctx, sql::ParamStore &params, common::ObObj &result)
 {
   int ret = OB_SUCCESS;
+  ObAiModelDdlTimeoutGuard timeout_guard;
   ObString endpoint_name;
   query::ObIAiEndpointAdmin *endpoint_admin = ctx.ai_endpoint_admin_;
 
@@ -277,6 +281,7 @@ int ObDBMSAiService::get_json_base_(
 int ObDBMSAiService::create_ai_model(ObPLExecCtx &ctx, sql::ParamStore &params, common::ObObj &result)
 {
   int ret = OB_SUCCESS;
+  ObAiModelDdlTimeoutGuard timeout_guard;
   ObString model_name;
 
   ObSchemaGetterGuard schema_guard;
@@ -332,11 +337,8 @@ int ObDBMSAiService::create_ai_model(ObPLExecCtx &ctx, sql::ParamStore &params, 
       } else if (OB_ISNULL(root_commands)) {
         ret = OB_NOT_INIT;
         LOG_WARN("root command service is not initialized", K(ret));
-      } else {
-        ObAiModelDdlTimeoutGuard timeout_guard;
-        if (OB_FAIL(query::serialize_root_service_call(
-                     [&]{ return root_commands->create_ai_model(arg); }))) {
-        }
+      } else if (OB_FAIL(query::serialize_root_service_call(
+                           [&]{ return root_commands->create_ai_model(arg); }))) {
       }
     }
 
@@ -347,6 +349,7 @@ int ObDBMSAiService::create_ai_model(ObPLExecCtx &ctx, sql::ParamStore &params, 
 int ObDBMSAiService::drop_ai_model(ObPLExecCtx &ctx, sql::ParamStore &params, common::ObObj &result)
 {
   int ret = OB_SUCCESS;
+  ObAiModelDdlTimeoutGuard timeout_guard;
   ObString model_name;
 
   ObSchemaGetterGuard schema_guard;
@@ -390,12 +393,9 @@ int ObDBMSAiService::drop_ai_model(ObPLExecCtx &ctx, sql::ParamStore &params, co
       if (OB_ISNULL(root_commands)) {
         ret = OB_NOT_INIT;
         LOG_WARN("root command service is not initialized", K(ret));
-      } else {
-        ObAiModelDdlTimeoutGuard timeout_guard;
-        if (OB_FAIL(query::serialize_root_service_call(
-                     [&]{ return root_commands->drop_ai_model(arg); }))) {
-        }
-      }
+      } else if (OB_FAIL(query::serialize_root_service_call(
+                           [&]{ return root_commands->drop_ai_model(arg); }))) {
+    }
 
     LOG_INFO("finished to drop ai model", K(ret), K(params), K(model_name));
   }
