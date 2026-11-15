@@ -237,6 +237,22 @@ public:
   virtual ~ObAIFuncJsonUtils() {}
   static bool ob_is_json_array_all_str(ObJsonArray* json_array);
   static int transform_array_to_json_array(ObIAllocator &allocator, ObArray<ObString> &contents, ObJsonArray *&array);
+  // Return true if the node is a JSON number (int/uint/double/decimal).
+  static bool is_json_number(ObJsonNode *node);
+  // Read a JSON number as double, the node must be a JSON number.
+  static int get_json_number_value(ObJsonNode *node, double &value);
+  // Validate that the node is a JSON array of numbers, and its dimension matches
+  // the expected dimension (expected_dimension <= 0 means skip the dimension check).
+  static int validate_embedding_array(ObJsonNode *node, int64_t expected_dimension);
+  // Collect embeddings from an OpenAI-style "data" array. Each element is an object
+  // holding the embedding array under %embedding_key and an optional "index" field.
+  // The result is ordered by the index field, which recovers the request order even
+  // if the model service returns the data array out of order.
+  static int collect_ordered_embeddings(ObIAllocator &allocator,
+                                        ObJsonArray *data_array,
+                                        const ObString &embedding_key,
+                                        int64_t expected_count,
+                                        ObJsonArray *&ordered_embeddings);
   static int get_json_object(ObIAllocator &allocator, ObJsonObject *&obj_node);
   static int get_json_array(ObIAllocator &allocator, ObJsonArray *&array_node);
   static int get_json_string(ObIAllocator &allocator, ObString &str, ObJsonString *&str_node);
@@ -379,8 +395,15 @@ public:
   static bool is_valid_prompt_object(ObJsonObject* prompt_object);
   static int replace_all_str_args_in_template(ObIAllocator &allocator, ObJsonObject* prompt_object, ObString& replaced_prompt_str);
   static int construct_prompt_object(ObIAllocator &allocator, ObString &template_str, ObJsonArray *args_array, ObJsonObject *&prompt_object);
+  // Render one placeholder argument to text. A string argument is used as it is,
+  // a nested prompt object is expanded recursively, and any other JSON value
+  // (array/object/number/boolean) is rendered as compact JSON text.
+  static int render_args_node(ObIAllocator &allocator, ObJsonNode *node, ObString &rendered, int64_t depth);
+  static int replace_all_str_args_in_template(ObIAllocator &allocator, ObJsonObject* prompt_object,
+                                              ObString& replaced_prompt_str, int64_t depth);
   static constexpr char prompt_template_key[20] = "template";
   static constexpr char prompt_args_key[20] = "args";
+  static constexpr int64_t max_prompt_nest_depth = 16;
 private:
   DISALLOW_COPY_AND_ASSIGN(ObAIFuncPromptObjectUtils);
 };
