@@ -110,9 +110,12 @@ int ObExprAIEmbed::calc_result_typeN(ObExprResType &type,
       }
     }
     if (OB_SUCC(ret)) {
-      type.set_varchar();
+      // A dense embedding of a high dimensional model contains thousands of
+      // floats, the JSON array is returned as LOB data instead of varchar.
+      type.set_type(ObLongTextType);
+      type.set_accuracy(ObAccuracy::DDL_DEFAULT_ACCURACY[ObLongTextType]);
       type.set_collation_type(CS_TYPE_UTF8MB4_BIN);
-      type.set_collation_level(CS_LEVEL_COERCIBLE);
+      type.set_collation_level(CS_LEVEL_IMPLICIT);
     }
   }
   return ret;
