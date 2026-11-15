@@ -106,6 +106,8 @@ int ObExprAIRerank::eval_ai_rerank(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &
     ret = OB_INVALID_ARGUMENT;
     LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_rerank, model id or query or documents is null");
     res.set_null();
+  } else if (FALSE_IT(arg_doc_key = (OB_NOT_NULL(arg_doc_key) && arg_doc_key->is_null())
+                                     ? nullptr : arg_doc_key)) {
   } else {
     ObEvalCtx::TempAllocGuard tmp_alloc_g(ctx);
     
