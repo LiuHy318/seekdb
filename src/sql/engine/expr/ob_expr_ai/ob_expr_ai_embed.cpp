@@ -128,9 +128,8 @@ int ObExprAIEmbed::eval_ai_embed(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &re
                          : OB_FAIL(expr.eval_param_value(ctx, arg_model_id, arg_content))) {
     LOG_WARN("evaluate parameters failed", K(ret));
   } else if (arg_model_id->is_null() || arg_content->is_null()) {
-    ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("model id or content is null", K(ret));
-    LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_embed, model id or content is null");
+    // A NULL input propagates a NULL result, the row never reaches the model
+    // service, which keeps a batched scan and a row-by-row scan consistent.
     res.set_null();
   } else {
     ObEvalCtx::TempAllocGuard tmp_alloc_g(ctx);
@@ -209,11 +208,7 @@ int ObExprAIEmbed::eval_ai_embed_batch(const ObExpr &expr, ObEvalCtx &ctx,
     for (int64_t i = 0; OB_SUCC(ret) && i < size; i++) {
       if (skip.at(i) || eval_flags.at(i)) {
         continue;
-      } else if (model_vec.at(i)->is_null()) {
-        ret = OB_INVALID_ARGUMENT;
-        LOG_WARN("model id is null", K(ret), K(i));
-        LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_embed, model id is null");
-      } else if (content_vec.at(i)->is_null()) {
+      } else if (model_vec.at(i)->is_null() || content_vec.at(i)->is_null()) {
         res[i].set_null();
         eval_flags.set(i);
       }
