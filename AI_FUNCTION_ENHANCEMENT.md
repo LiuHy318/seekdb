@@ -38,7 +38,7 @@
 - 返回值为 JSON 数组文本，例如 `[0.1, 0.2, 0.3]`。
 - 返回结果校验（`ObAIFuncJsonUtils::validate_embedding_array`）：
   必须是 JSON 数组、维度非空、元素必须都是数字；显式指定 `dimension` 时
-  返回维度必须与请求维度一致，否则报错。
+  返回维度必须与请求维度一致，否则报错（`ai_embed, result dimension is not equal to dimension`）。
 
 ## 三、AI_COMPLETE 请求与响应
 
@@ -46,43 +46,96 @@
 
 - 普通 Prompt、`AI_PROMPT` 生成的 JSON prompt、`TEXT/LONGTEXT` 长文本 prompt 均支持；
   prompt 为 JSON 时不再要求 `args` 全部是字符串，允许 JSON 数组/对象与嵌套 prompt。
-- `parameters`（JSON config）必须是 JSON 对象，数组或标量不再被强转为对象。
-- 响应校验：`call_completion` 解析后若内容为空，返回 `OB_INVALID_DATA`。
+- `parameters`（JSON config）必须是 JSON 对象：`get_json_object_form_str` 增加了
+  类型校验，数组或标量不再被强转为 `ObJsonObject`，返回
+  `OB_INVALID_ARGUMENT`（`invalid json object, an object is expected`）。
+- 响应校验：`call_completion` 解析后若内容为空，返回 `OB_INVALID_DATA` 并回传
+  `unexpected http message: response content is empty`；HTTP 非 200、JSON 结构
+  不合法等异常响应沿用原有错误路径。
+- `temperature` / `max_tokens` 等 config 字段由 `compact_json_object` 原样透传进请求体。
 
 ## 四、Ollama Provider
 
 改动文件：`ob_ai_func_utils.cpp`、`ob_ai_func_client.cpp`、`ob_ai_service_struct.cpp`
 
-- `VALID_PROVIDERS` 增加 `OLLAMA`，端点可用任意大小写创建/查询/修改/删除。
-- **免 API Key**：`check_valid` 对 `OLLAMA` 允许 `access_key` 为空；
+- `VALID_PROVIDERS` 增加 `OLLAMA`，端点可用任意大小写创建/查询/修改/删除
+  （`is_valid_provider` 使用 `case_compare`）。
+- **免 API Key**：`ObAiModelEndpointInfo::check_valid` 对 `OLLAMA` 允许 `access_key` 为空；
   `ObAIFuncClient::init` 不再强制要求 headers 非空。
-- 请求头只下发 `Content-Type: application/json`，不带 Authorization。
-- 文本生成：非流式请求体 `{"model": ..., "prompt": ..., "stream": false}`，解析 `$.response`。
-- Embedding：兼容 `{"embeddings": [[...]]}` 与旧版 `{"embedding": [...]}`。
+- 请求头：`ObOllamaUtils::get_header` 只下发 `Content-Type: application/json`，不带 Authorization。
+- 文本生成：`get_complete_provider` 增加 `OLLAMA -> ObOllamaComplete`；
+  请求体为 `{"model": ..., "prompt": ..., "stream": false}`（非流式），
+  响应解析 `$.response`，并要求其为字符串。
+- Embedding：`get_embed_provider` 增加 `OLLAMA -> ObOllamaEmbed`；
+  响应同时兼容新版原生协议 `{"embeddings": [[...], ...]}` 与旧版
+  `{"embedding": [...]}`，并逐个校验向量元素为数字。
 
 ## 五、AI_RERANK 结果正确性
 
 改动文件：`ob_expr_ai_rerank.cpp/.h`
 
 - 字符串数组与对象数组（指定 `doc_key`）两条路径都按 `batch_size = 20` 分批请求。
-- 每批结果做返回校验：条数等于该批文档数、`index` 为整数且在当前批范围内不重复。
-- 全局索引映射：每批 `index` 加上批起始偏移，输出中 `index` 是原始文档全局下标。
-- 稳定排序：按 `relevance_score` 降序、同分按 `index` 升序。
-- 对象数组路径回填原始文档对象并追加 `_model_score` 字段。
+- 每批结果做返回校验（`validate_rerank_result`）：条数必须等于该批文档数、
+  每条必须是含 `index` / `relevance_score` 的对象、`index` 为整数且在当前批范围内、
+  `index` 不重复。
+- 全局索引映射：`batch_result_add_base` 给每批的 `index` 加上批起始偏移，
+  保证输出中的 `index` 是原始文档的全局下标。
+- 稳定排序：`sort_rerank_result` 按 `relevance_score` 降序、同分按 `index` 升序
+  （插入排序），同分文档保持原有相对顺序。
+- 对象数组路径下，`attach_score_to_documents` 按排序结果回填原始文档对象，
+  并追加 `_model_score` 字段。
 
 ## 六、AI_EMBED 跨行批量
 
 改动文件：`ob_expr_ai_embed.cpp/.h`
 
-- 新增向量化路径 `eval_ai_embed_batch`，在 `cg_expr` 中注册 `eval_batch_func_`。
-- 同一请求内各行需同一 model key 与同一 dimension，单请求上限 10 条输入，超过自动拆批。
-- 一次请求携带多条 `input`，响应按 `index` 归位，乱序返回也能还原顺序。
-- NULL 输入传播：`sql` 为 NULL 的行返回 NULL 且不进入请求。
-- 结果按行写回（`init_with_batch_idx`），行序与维度映射一一对应。
+- 新增向量化路径 `ObExprAIEmbed::eval_ai_embed_batch`，并在 `cg_expr` 中注册
+  `rt_expr.eval_batch_func_`：一次 `eval_batch` 拉起整批参数，而不是逐行调用。
+- 同一请求内的行满足「同一 model key + 同一 dimension」，单请求上限
+  `MAX_EMBED_BATCH_SIZE = 10` 条输入，超过则自动拆成多批次。
+- 一次请求携带多条 `input`，响应按 `index` 归位
+  （`collect_ordered_embeddings`）：先按请求条数开槽，逐条用响应里的 `index`
+  落位，缺号/重号/越界均报 `OB_INVALID_DATA`，因此服务端乱序返回也能还原顺序。
+- NULL 输入传播：`sql` 为 NULL 的行直接返回 NULL 且不进入请求。
+- 结果按行写回：使用 `ObTextStringDatumResult::init_with_batch_idx` 把每行结果
+  写进该行对应的 batch 结果内存，保证行序与维度映射一一对应。
+- 批次请求失败时整条表达式返回错误，不会把上一批结果串到当前行。
 
 ## 验证方式与已知限制
 
-- 已用 OceanBase 官方 devtools 内的 clang 对全部改动文件做过 `-fsyntax-only` 语法检查，全部通过。
-- 本机未构建完整 seekdb（依赖体量大、磁盘不足），因此未运行单测与 mysqltest。
+- 已用 OceanBase 官方 devtools 内的 clang 20 对全部改动文件做过
+  `-fsyntax-only` 语法检查（`src/sql/engine/expr/ob_expr_ai/*`、
+  `src/share/ai_service/ob_ai_service_struct.cpp`），全部通过。
+- 本机未构建完整 seekdb（依赖体量大、磁盘不足），因此**未运行**
+  `ob_expr_ai_prompt_test` / `test_ob_openai_utils` 单测与 mysqltest，
+  SQL 层行为建议在具备 Mock AI Service（0.0.0.0:8000）的环境下按下列用例复跑。
 - 语义变化提示：旧版 `ai_prompt.test` 中「JSON 参数应报错」「text/longtext 应报错」
-  的断言与赛题要求相反，复跑前需按新语义更新。
+  的断言与赛题要求相反，复跑前需按新语义更新（JSON 参数、TEXT/LONGTEXT 现在返回结果）。
+
+### 自测用例（需要 Mock AI Service）
+
+```sql
+-- 1. AI_PROMPT：JSON 参数、嵌套、重复占位符
+SELECT AI_PROMPT('a={0}, b={1}', '1', JSON_ARRAY(1,2));
+SELECT AI_PROMPT('{0} / {0}', AI_PROMPT('inner {0}', 'x'));
+SELECT AI_PROMPT('{0}', 'a') = '{"args": ["a"], "template": "{0}"}';
+
+-- 2. AI_EMBED 单行 / 维度校验
+SELECT AI_EMBED('mock_embed', 'hello');
+SELECT AI_EMBED('mock_embed', 'hello', 4);
+SELECT AI_EMBED('mock_embed', 'hello', 3);   -- mock 返回 4 维，应报维度不一致
+
+-- 3. AI_EMBED 跨行批量（超过 10 行会拆成多请求）
+SELECT id, AI_EMBED('mock_embed', content) FROM t_embed ORDER BY id;
+SELECT id, AI_EMBED('mock_embed', content) FROM t_embed WHERE content IS NOT NULL LIMIT 3;
+
+-- 4. AI_RERANK 分批与全局索引
+SELECT AI_RERANK('mock_rerank', 'apple', (SELECT JSON_ARRAYAGG(txt) FROM t_doc));
+SELECT AI_RERANK('mock_rerank', 'apple', doc, 'text') FROM t_doc_obj;
+
+-- 5. Ollama
+CALL DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('ep_ollama',
+  '{"ai_model_name":"ob_complete","url":"http://127.0.0.1:11434/api/generate",
+    "provider":"OLLAMA","request_model_name":"llama3"}');
+SELECT AI_COMPLETE('ob_complete', 'hello');
+```
