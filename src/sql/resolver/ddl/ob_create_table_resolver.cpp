@@ -896,6 +896,48 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
       }
     }
 
+    // AI column: every AI column materialises three hidden columns that carry the
+    // per row state, the in flight request id and the result specification.
+    if (OB_SUCC(ret)) {
+      const int64_t ai_scan_cnt = resolved_cols.count();
+      for (int64_t i = 0; OB_SUCC(ret) && i < ai_scan_cnt; ++i) {
+        ObColumnSchemaV2 &ai_col = resolved_cols.at(i);
+        const ObString ai_comment = ai_col.get_comment_str();
+        if (ai_comment.length() <= 0 || NULL == strstr(ai_comment.ptr(), "\"ai_column\":1")) {
+          // not an ai column
+        } else {
+          static const char *AI_HIDDEN_PREFIX[3] = {"__ai_state_", "__ai_request_", "__ai_spec_"};
+          for (int64_t k = 0; OB_SUCC(ret) && k < 3; ++k) {
+            ObColumnSchemaV2 hidden_col;
+            char name_buf[OB_MAX_COLUMN_NAME_LENGTH];
+            int64_t name_len = snprintf(name_buf, sizeof(name_buf), "%s%.*s", AI_HIDDEN_PREFIX[k],
+                                        ai_col.get_column_name_str().length(),
+                                        ai_col.get_column_name_str().ptr());
+            if (OB_UNLIKELY(name_len <= 0 || name_len >= static_cast<int64_t>(sizeof(name_buf)))) {
+              ret = OB_ERR_UNEXPECTED;
+            } else if (OB_FAIL(hidden_col.set_column_name(ObString(static_cast<int32_t>(name_len), name_buf)))) {
+            } else {
+              hidden_col.set_column_id(gen_column_id());
+              hidden_col.set_is_hidden(true);
+              hidden_col.set_nullable(true);
+              if (0 == k) {
+                hidden_col.set_data_type(ObIntType);
+              } else {
+                hidden_col.set_data_type(ObVarcharType);
+                hidden_col.set_data_length(0 == k ? 128 : 1024);
+                hidden_col.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+                hidden_col.set_charset_type(CHARSET_UTF8MB4);
+              }
+              ObColumnNameHashWrapper name_key(hidden_col.get_column_name_str());
+              if (OB_FAIL(table_schema.add_column(hidden_col))) {
+              } else if (OB_FAIL(column_name_set_.set_refactored(name_key))) {
+              }
+            }
+          }
+        }
+      }
+    }
+
     // A table must have at least one column as a visible column
     if (OB_SUCC(ret)) {
       // RESOLVE_NON_COL == resolve_rule when, only parse non-column definitions

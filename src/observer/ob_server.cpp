@@ -29,6 +29,7 @@
 #include <thread>
 #include <cstdio>
 #include "observer/ob_server.h"
+#include "observer/ai_column/ob_ai_column_worker.h"
 #include "observer/ob_system_package_load_service.h"
 #include "rootserver/ob_ddl_service_launcher.h"
 #include "share/ob_autoincrement_service.h"
@@ -1131,6 +1132,8 @@ void ObServer::destroy()
 int ObServer::start()
 {
   int ret = OB_SUCCESS;
+  // AI column background worker: drains the in-memory task queue
+  (void)ObAiColumnWorker::get_instance().start();
   gctx_.status_ = SS_STARTING;
   // begin to start a observer
   FLOG_INFO("[OBSERVER_NOTICE] start observer begin");

@@ -12878,6 +12878,26 @@ static const _error _error_OB_ERR_INVALID_VECTOR_DIM = {
       .str_error             = "Invalid dimension for vector.",
       .str_user_error        = "inconsistent dimension: expected %u got %u"
 };
+static const _error _error_OB_ERR_AI_COLUMN_DIM_MISMATCH = {
+      .error_name            = "OB_ERR_AI_COLUMN_DIM_MISMATCH",
+      .error_cause           = "",
+      .error_solution        = "",
+      .mysql_errno           = -7600,
+      .sqlstate              = "22000",
+      .str_error             = "inconsistent dimension: expected %d got %d",
+      .str_user_error        = "inconsistent dimension: expected %d got %d",
+};
+
+static const _error _error_OB_ERR_AI_COLUMN_NOT_READY = {
+      .error_name            = "OB_ERR_AI_COLUMN_NOT_READY",
+      .error_cause           = "",
+      .error_solution        = "",
+      .mysql_errno           = -11120,
+      .sqlstate              = "",
+      .str_error             = "AI column has unfinished tasks for table_id=%lu, column_id=%lu",
+      .str_user_error        = "AI column has unfinished tasks for table_id=%lu, column_id=%lu",
+};
+
 static const _error _error_OB_ERR_BAD_VEC_INDEX_COLUMN = {
       .error_name            = "OB_ERR_BAD_VEC_INDEX_COLUMN",
       .error_cause           = "Internal Error",
@@ -15383,7 +15403,8 @@ struct ObStrErrorInit
     _errors[-OB_ERR_CONVERSION_OF_UNIT] = &_error_OB_ERR_CONVERSION_OF_UNIT;
     _errors[-OB_ERR_PARAM_OUT_OF_RANGE] = &_error_OB_ERR_PARAM_OUT_OF_RANGE;
     _errors[-OB_ERR_INVALID_VECTOR_DIM] = &_error_OB_ERR_INVALID_VECTOR_DIM;
-    _errors[-OB_ERR_BAD_VEC_INDEX_COLUMN] = &_error_OB_ERR_BAD_VEC_INDEX_COLUMN;
+    _errors[-OB_ERR_AI_COLUMN_DIM_MISMATCH] = &_error_OB_ERR_AI_COLUMN_DIM_MISMATCH;
+  _errors[-OB_ERR_BAD_VEC_INDEX_COLUMN] = &_error_OB_ERR_BAD_VEC_INDEX_COLUMN;
     _errors[-OB_ERR_ARRAY_TYPE_MISMATCH] = &_error_OB_ERR_ARRAY_TYPE_MISMATCH;
     _errors[-OB_ERR_VSAG_MEM_LIMIT_EXCEEDED] = &_error_OB_ERR_VSAG_MEM_LIMIT_EXCEEDED;
     _errors[-OB_ERR_VSAG_RETURN_ERROR] = &_error_OB_ERR_VSAG_RETURN_ERROR;

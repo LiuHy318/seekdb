@@ -2281,6 +2281,13 @@ int ObDDLResolver::resolve_normal_column_attribute(ObColumnSchemaV2 &column,
         }
         break;
       }
+      case T_CONSTR_AI_COLUMN: {
+        ParseNode *ai_expr_node = attr_node->children_[0];
+        ParseNode *ai_opts_node = attr_node->children_[1];
+        if (OB_FAIL(resolve_ai_column_attribute(column, ai_expr_node, ai_opts_node))) {
+        }
+        break;
+      }
       case T_VISIBLE:
       case T_INVISIBLE:
       {
@@ -8074,6 +8081,224 @@ int ObDDLResolver::get_partition_keys_by_part_func_expr(
       } else {
         pos += wc.length();
       }
+    }
+  }
+  return ret;
+}
+
+
+
+namespace
+{
+// Walks an AI column expression and returns the referenced column names (comma
+// separated) plus the literal dimension of AI_EMBED(...) when it has one.
+void collect_ai_expr_refs(const ParseNode *node, ObSqlString &refs, int64_t &embed_dim)
+{
+  if (nullptr == node) {
+    return;
+  }
+  if (T_INT == node->type_ && node->value_ > 0 && embed_dim <= 0) {
+    // first positive integer literal: the requested AI_EMBED dimension
+    embed_dim = node->value_;
+  }
+  if ((T_IDENT == node->type_ || T_REF_COLUMN == node->type_)
+      && node->str_len_ > 0 && nullptr != node->str_value_) {
+    if (refs.length() > 0) {
+      refs.append(",");
+    }
+    refs.append_fmt("%.*s", node->str_len_, node->str_value_);
+  }
+  if ((T_REF_COLUMN == node->type_ || T_IDENT == node->type_) && node->num_child_ > 0 && nullptr != node->children_[0]) {
+    const ParseNode *name = node->children_[0];
+    if (refs.length() > 0) {
+      refs.append(",");
+    }
+    refs.append_fmt("%.*s", name->str_len_, name->str_value_);
+  }
+  // AI_EMBED is parsed as T_FUN_SYS ["ai_embed", param list]; the third
+  // parameter is the requested dimension.
+  if (T_FUN_SYS == node->type_ && 2 == node->num_child_ && nullptr != node->children_[0]
+      && nullptr != node->children_[1]) {
+    const ParseNode *fn = node->children_[0];
+    if (0 == ObString(fn->str_len_, fn->str_value_).case_compare("ai_embed")) {
+      // Any positive integer literal inside the AI expression is the requested
+      // dimension of AI_EMBED; the vector column side is checked separately.
+      const ParseNode *param = node->children_[1];
+      while (nullptr != param) {
+        const ParseNode *cur = param;
+        if (T_LINK_NODE == param->type_) {
+          cur = param->children_[1];
+          param = param->children_[0];
+        } else {
+          param = nullptr;
+        }
+        if (nullptr != cur && T_INT == cur->type_ && cur->value_ > 0 && embed_dim <= 0) {
+          embed_dim = cur->value_;
+        }
+      }
+    }
+  }
+  for (int64_t i = 0; i < node->num_child_; ++i) {
+    collect_ai_expr_refs(node->children_[i], refs, embed_dim);
+  }
+}
+} // namespace
+
+
+// Prints a readable, single line form of the AI column expression.  It is stored
+// in the column metadata so that SHOW / __all_ai_column can display the rule that
+// produced the column.
+static void print_ai_expr_node(const ParseNode *node, ObSqlString &out)
+{
+  if (nullptr == node) {
+    return;
+  }
+  switch (node->type_) {
+    case T_LINK_NODE: {
+      ObSqlString left;
+      print_ai_expr_node(node->children_[0], left);
+      if (left.length() > 0) {
+        out.append(left.ptr());
+        out.append(",");
+      }
+      print_ai_expr_node(node->children_[1], out);
+      break;
+    }
+    case T_FUN_SYS: {
+      if (node->num_child_ >= 1 && nullptr != node->children_[0]) {
+        const ParseNode *fn = node->children_[0];
+        out.append_fmt("%.*s(", fn->str_len_, fn->str_value_);
+        if (node->num_child_ >= 2) {
+          print_ai_expr_node(node->children_[1], out);
+        }
+        out.append(")");
+      }
+      break;
+    }
+    case T_IDENT: {
+      out.append_fmt("%.*s", node->str_len_, node->str_value_);
+      break;
+    }
+    case T_INT: {
+      out.append_fmt("%ld", node->value_);
+      break;
+    }
+    case T_VARCHAR:
+    case T_CHAR: {
+      out.append_fmt("'%.*s'", node->str_len_, node->str_value_);
+      break;
+    }
+    default: {
+      // container node: print the non empty children separated by commas
+      bool first = true;
+      for (int64_t i = 0; i < node->num_child_; ++i) {
+        ObSqlString child;
+        print_ai_expr_node(node->children_[i], child);
+        if (child.length() > 0) {
+          if (!first) {
+            out.append(",");
+          }
+          out.append(child.ptr());
+          first = false;
+        }
+      }
+      break;
+    }
+  }
+}
+
+int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
+                                               ParseNode *ai_expr_node,
+                                               ParseNode *ai_opts_node)
+{
+  int ret = OB_SUCCESS;
+  int64_t max_retries = 0;
+  int64_t embed_dim = 0;
+  const ObObjType ai_column_type = column.get_data_type();
+  const bool json_prompt = (ObJsonType == ai_column_type);
+  const bool int_prompt = ob_is_integer_type(ai_column_type)
+                          || ob_is_unsigned_type(ai_column_type);
+  bool sync_async = true;
+  if (OB_ISNULL(ai_expr_node)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_NOT_NULL(ai_opts_node)) {
+    ParseNode *node = ai_opts_node;
+    // the option list is a left deep T_LINK_NODE chain
+    while (OB_SUCC(ret) && OB_NOT_NULL(node)) {
+      ParseNode *opt = nullptr;
+      if (T_LINK_NODE == node->type_) {
+        opt = node->children_[1];
+        node = node->children_[0];
+      } else {
+        opt = node;
+        node = nullptr;
+      }
+      if (OB_ISNULL(opt) || T_AI_COLUMN_OPTION != opt->type_ || 2 != opt->num_child_) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        ParseNode *key = opt->children_[0];
+        ParseNode *value = opt->children_[1];
+        if (OB_ISNULL(key) || OB_ISNULL(value)) {
+          ret = OB_ERR_UNEXPECTED;
+        } else {
+          ObString key_str(key->str_len_, key->str_value_);
+          if (0 == key_str.case_compare("max_retries")) {
+            max_retries = value->value_;
+          } else if (0 == key_str.case_compare("sync_mode")) {
+            ObString mode(value->str_len_, value->str_value_);
+            if (0 != mode.case_compare("async")) {
+              ret = OB_NOT_SUPPORTED;
+              LOG_USER_ERROR(OB_NOT_SUPPORTED, "only sync_mode = 'async' is supported for AI column");
+            }
+          } else {
+            ret = OB_INVALID_ARGUMENT;
+            LOG_USER_ERROR(OB_INVALID_ARGUMENT, "unknown AI column option");
+          }
+        }
+      }
+    }
+  }
+  if (OB_SUCC(ret)) {
+    ObSqlString refs;
+    collect_ai_expr_refs(ai_expr_node, refs, embed_dim);
+    {
+      int64_t col_dim = 0;
+      const ObIArray<ObString> &ext = column.get_extended_type_info();
+      if (ext.count() > 0) {
+        // The vector column dimension is stored as e.g. "VECTOR(4)".
+        const char *lp = strchr(ext.at(0).ptr(), '(');
+        if (nullptr != lp) {
+          col_dim = strtoll(lp + 1, nullptr, 10);
+        }
+      }
+      LOG_INFO("ai column dim check", K(ret), K(embed_dim), K(col_dim), K(ext.count()),
+               K(ext.count() > 0 ? ext.at(0) : ObString()));
+      if (embed_dim > 0 && col_dim > 0 && col_dim != embed_dim) {
+        ret = OB_ERR_AI_COLUMN_DIM_MISMATCH;
+        LOG_USER_ERROR(OB_ERR_AI_COLUMN_DIM_MISMATCH);
+      }
+    }
+    ObSqlString def;
+    ObSqlString normalized;
+    ObSqlString expr_text;
+    print_ai_expr_node(ai_expr_node, expr_text);
+    if (expr_text.length() <= 0) {
+      expr_text.append("ai");
+    }
+    if (json_prompt) {
+      normalized.append_fmt("Return exactly one valid JSON value");
+    } else if (int_prompt) {
+      normalized.append_fmt("Return the answer as a base-10 integer, without any other text");
+    }
+    if (OB_FAIL(def.append_fmt("{\"ai_column\":1,\"sync_mode\":\"%s\",\"max_retries\":%ld,"
+                               "\"dim\":%ld,\"dependencies\":\"%s\",\"expression\":\"%s\",\"normalized_expr\":\"%s\"}",
+                               sync_async ? "async" : "sync",
+                               max_retries,
+                               embed_dim,
+                               refs.length() > 0 ? refs.ptr() : "",
+                               expr_text.ptr(),
+                               normalized.ptr()))) {
+    } else if (OB_FAIL(column.set_comment(def.ptr()))) {
     }
   }
   return ret;
