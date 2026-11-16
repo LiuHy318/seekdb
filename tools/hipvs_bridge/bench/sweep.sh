@@ -12,8 +12,10 @@
 #   auto auto auto auto
 #
 # The baseline quality point must stay in the sweep: the contest gates recall
-# against the frozen baseline (SIFT >= 0.995 Top-10, Hidden >= baseline-0.005),
-# so a faster point only counts when its recall does not move.
+# against absolute floors AND against the same-round frozen baseline
+# (SIFT@10/@100 >= 0.95, Hidden@10 >= 0.90, Hidden@100 >= 0.85, and no more than
+# 0.005 below the baseline in the same round), so a faster point only counts
+# when its recall does not move.
 
 set -Eeuo pipefail
 

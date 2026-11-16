@@ -208,14 +208,23 @@ def make_dataset(args):
 
 
 def exact_ground_truth(vectors, queries, ks):
-    """Exact L2 top-m ax ids; m = max(ks). Chunked to bound memory."""
+    """Exact L2 top-m ids, ordered by distance; m = max(ks).
+
+    The ids are sorted by distance on purpose: recall@k for a k smaller than m
+    must be compared against the true top-k prefix, not against an arbitrary
+    slice of the top-m candidate set that np.argpartition happens to return.
+    """
     m = max(ks)
     out = np.empty((queries.shape[0], m), dtype=np.int64)
     sq = np.sum(queries ** 2, axis=1)[:, None]
+    base_sq = np.sum(vectors ** 2, axis=1)[None, :]
     for start in range(0, queries.shape[0], 32):
         chunk = queries[start:start + 32]
-        dist = sq[start:start + 32] + np.sum(vectors ** 2, axis=1)[None, :] - 2.0 * chunk @ vectors.T
-        out[start:start + 32] = np.argpartition(dist, m - 1, axis=1)[:, :m]
+        dist = sq[start:start + 32] + base_sq - 2.0 * chunk @ vectors.T
+        part = np.argpartition(dist, m - 1, axis=1)[:, :m]
+        part_dist = np.take_along_axis(dist, part, axis=1)
+        order = np.argsort(part_dist, axis=1, kind="stable")
+        out[start:start + 32] = np.take_along_axis(part, order, axis=1)
     return out
 
 

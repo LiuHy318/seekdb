@@ -151,10 +151,56 @@ tools/hipvs_bridge/bench/sweep.sh \
 
 ## 5. CPU/GPU 构建性能对比报告
 
-> 下表按赛题要求给出"冻结基线 / 候选版本"、"GPU / CPU"的构建耗时与 Recall 对比。
-> 本仓库只提供测量工具与候选实现，**具体数值必须在评测同款环境（Radeon PRO W7900D、
-> ROCm 7.2.4、24 核 CPU 配额）上跑 `run_build_bench.py --lib both` 后填写**，不要用
-> 其它机器或其它数据集的自测数字代替。
+> 赛题要求的提交产物之一是"CPU/GPU 构建性能对比报告"。正式成绩由组织方在云端统一
+> 评测产生（同一轮内"冻结基线 + 参赛版本"配对，两个数据集交换顺序），本仓库**不自带
+> 也不编造耗时数字**：这里给出可复现的测量流程，以及在评测同款环境上把实测结果自动
+> 填进下表的工具。
+
+### 5.1 需要跑的两组测量
+
+评测同款环境指 Radeon PRO W7900D、ROCm 7.2.4、24 核 CPU 配额。不要用其它机器、其它
+数据集或合成数据的自测数字代替正式数据。
+
+```bash
+# 1) 冻结基线：按 3 节的命令编译 amd-cagra-contest-baseline-v5（commit 634888d9b）
+python3 tools/hipvs_bridge/bench/run_build_bench.py \
+  --observer /work/base/build_release/src/observer/seekdb \
+  --bridge /work/base/bridge/libseekdb_cuvs_bridge.so \
+  --base-dir /tmp/bench --port 2981 \
+  --n 250000 --dim 128 --nq 4096 --lib both \
+  --fvecs /work/datasets/sift250k.fvecs \
+  --out /tmp/bench/baseline-sift
+
+# 2) 本仓库候选版本：同一套编译命令、同一份数据、同一个脚本
+python3 tools/hipvs_bridge/bench/run_build_bench.py \
+  --observer build_release/src/observer/seekdb \
+  --bridge /work/bridge/libseekdb_cuvs_bridge.so \
+  --base-dir /tmp/bench --port 2981 \
+  --n 250000 --dim 128 --nq 4096 --lib both \
+  --fvecs /work/datasets/sift250k.fvecs \
+  --out /tmp/bench/candidate-sift
+```
+
+`--lib both` 会在同一份数据上先后构建 `lib=cuvs`（GPU）与 `lib=vsag`（CPU），因此
+`results.json` 里同时含 GPU 与 CPU 两个 run；Hidden250K 把 `--dim` 换成 256、用
+Hidden 的 `.fvecs`（或合成数据）重复一次即可。
+
+### 5.2 一键生成报告表格
+
+```bash
+python3 tools/hipvs_bridge/bench/fill_report.py \
+  --dataset SIFT250K \
+  --baseline /tmp/bench/baseline-sift/results.json \
+  --candidate /tmp/bench/candidate-sift/results.json \
+  --cpu /tmp/bench/candidate-sift/results.json \
+  --out /tmp/bench/report-sift250k.md
+```
+
+脚本对每个后端分别打印"构建耗时 / 加速比 / Recall@10 / Recall@100"，并按 5.4 的门槛
+输出 pass/FAIL 判定。缺失或失败的一组会显式写成 `not measured`，不会补一个看起来合理
+的数字。
+
+### 5.3 报告表格
 
 | 数据集 | 后端 | 构建耗时（含第一条查询, s） | 加速比 | Recall@10 | Recall@100 |
 | --- | --- | ---: | ---: | ---: | ---: |
@@ -166,13 +212,18 @@ tools/hipvs_bridge/bench/sweep.sh \
 | Hidden250K (250K×256) | `lib=vsag`（CPU 参考） | 待填 | 待填 | 待填 | 待填 |
 
 赛题公布的 V5 冻结基线参考值（W7900D，10 次运行）：SIFT250K 20～27 s（中位数约 23 s），
-Hidden250K 29～35 s（中位数约 30 s）。
+Hidden250K 29～35 s（中位数约 30 s）。同轮之间本身有 5%～15% 波动，所以正式成绩只与
+同轮基线配对比较。
 
-Recall 门槛（必须同时满足，否则本次计 0 分）：
+### 5.4 Recall 门槛（必须同时满足，否则本次计 0 分）
 
 * SIFT250K：Recall@10 / @100 ≥ 0.95；
 * Hidden250K：Recall@10 ≥ 0.90、Recall@100 ≥ 0.85；
 * 两个数据集都要求相比**同轮**冻结基线下降不超过 0.005。
+
+本仓库默认参数与冻结基线逐项一致（`nn_descent`、graph degree 128、intermediate degree
+256、niter 100），因此 Recall 与基线同源；任何通过 `SEEKDB_CUVS_*` 收紧参数的尝试，
+都必须先在评测同款 GPU 上用 5.1/5.2 的流程确认上表门槛仍然满足，再把值写死成默认值。
 
 ## 6. 注意事项
 
