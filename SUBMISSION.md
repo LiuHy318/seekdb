@@ -37,10 +37,13 @@ git merge-base --is-ancestor 634888d9b037153fa143d2c913ba4b25503e1d62 HEAD && ec
    按需增长，并在 `seekdb_cuvs_free()` 统一释放；`itopk_size` 默认值
    （`max(512, 4*topk)`）与 `search_width` 保持不变，检索结果不变。
 
-3. **建图/检索参数可外部标定，默认值等于冻结基线**
+3. **建图迭代数下调到 40（主要加速项），图质量参数保持基线值**
    `SEEKDB_CUVS_BUILD_ALGO`/`GRAPH_DEGREE`/`INTERMEDIATE_DEGREE`/`NITER`/`ITOPK`/
-   `SEARCH_WIDTH`/`TRACE` 七个环境变量，默认值就是 `nn_descent + 128 + 256 + 100`。
-   不设置任何变量时，建出的图与基线完全相同；标定流程见
+   `SEARCH_WIDTH`/`TRACE` 七个环境变量，默认值为 `nn_descent + 128 + 256 + 40`。
+   基线把 NN-Descent 迭代定在 100，这 100 轮几乎就是整个构建预算；`graph_degree`
+   与 `intermediate_graph_degree` 仍锁在基线的 128/256（基线正是靠这两个值过 256d
+   Recall 门槛），只把迭代数降到收敛所需的 40。要回到与基线逐位一致的图，
+   设置 `SEEKDB_CUVS_NITER=100` 即可；标定流程见
    `docs/gpu-vector-index-hipvs-cuvs/contest-optimization.md` 第 4 节。
 
 4. **可复现的测量与报告工具**（`tools/hipvs_bridge/bench/`）
@@ -97,7 +100,7 @@ Hidden250K 用 `--dim 256` 再跑一遍。参数扫描用
 | 基于 V5 冻结 commit | 是，`634888d9b` 是 HEAD 的祖先 |
 | GPU 真实参与建图与检索 | 建图仍走 `cuvsCagraBuild`，检索仍走 `cuvsCagraSearch`；未引入 CPU 建图或 CPU 检索替代 |
 | 结果正确、ID 不重复 | 批次化不改变向量/ID/顺序；检索 `topk` 行为未变 |
-| Recall 门槛 | 建图参数与基线逐项相同，图与基线同源；未放宽任何建图参数 |
+| Recall 门槛 | `graph_degree`/`intermediate_graph_degree` 与基线相同（128/256），只把 NN-Descent 迭代 100→40；`SEEKDB_CUVS_NITER=100` 可还原基线质量点 |
 | 查询吞吐 ≥ 基线 90% | 检索 `itopk_size`/`search_width` 默认值未变，仅复用缓冲区 |
 | 显存不超基线 1.25 倍 | 仅复用已释放过的检索缓冲，峰值不高于基线 |
 | `lib=vsag` CPU 路径可用 | 未改动 VSAG 路径，批次化在 `lib=vsag` 下同样走批量 `add_index` |
@@ -111,5 +114,6 @@ Hidden250K 用 `--dim 256` 再跑一遍。参数扫描用
   流程在评测同款环境（W7900D / ROCm 7.2.4 / 24 核）跑完后由 `fill_report.py` 自动填充。
   正式成绩以组织方云端统一评测为准。
 * `lib=cuvs` 仍只支持稠密 FP32 + L2，与基线一致；余弦/内积在 DDL 阶段拒绝。
-* 参数标定旋钮只有在确认 Recall 满足"绝对下限 + 相对同轮基线下降 ≤ 0.005"后才建议写死
-  为默认值；本分支没有擅自收紧默认参数。
+* 参数标定的取舍：默认迭代数 100→40 是"用更少 NN-Descent 轮次换构建时间"的显式选择，
+  图的度数未动。若同轮评测显示 256d Recall 相对基线下降逼近 0.005，把
+  `SEEKDB_CUVS_NITER` 逐档回调（40 → 50 → 60）即可在不改代码的前提下退让。

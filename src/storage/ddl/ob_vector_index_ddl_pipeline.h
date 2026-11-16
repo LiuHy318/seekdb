@@ -274,7 +274,13 @@ class ObHNSWIndexAppendBufferOperator : public ObVectorIndexBaseOperator
 public:
   explicit ObHNSWIndexAppendBufferOperator(ObPipeline *pipeline)
     : ObVectorIndexBaseOperator(pipeline)
-  {}
+  {
+    // Size the staging buffers once: without this the fast path pays for vector
+    // doubling while it accumulates rows, which shows up as a few percent of
+    // the index-build window on 250K-row tables.
+    batch_vectors_.reserve(static_cast<size_t>(HNSW_APPEND_BATCH_MAX_FLOATS));
+    batch_vids_.reserve(static_cast<size_t>(HNSW_APPEND_BATCH_MAX_ROWS));
+  }
   virtual int init(
       const ObTabletID &tablet_id);
   TO_STRING_KV(K_(vec_dim), K_(vec_idx_param), K_(vector_vid_col_idx), K_(vector_col_idx),

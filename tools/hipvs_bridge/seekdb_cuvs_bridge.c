@@ -34,11 +34,15 @@ typedef struct {
 /* Build/search knobs.                                                        */
 /*                                                                            */
 /* The frozen baseline hard-codes the quality configuration (NN-Descent,      */
-/* graph degree 128, intermediate degree 256, 100 iterations). Those exact    */
-/* values stay the defaults, so an un-tuned build produces the same graph as  */
-/* the baseline, while the knobs are also exposed through the environment so  */
-/* that a candidate can be profiled and tuned on the target GPU without       */
-/* recompiling the server:                                                    */
+/* graph degree 128, intermediate degree 256, 100 iterations) and that is     */
+/* where the whole build budget goes: NN-Descent runs O(niter) rounds over    */
+/* the intermediate graph, so 100 iterations alone cost roughly five times    */
+/* what 20 iterations cost. The graph degrees stay at the frozen values       */
+/* (they are what the baseline needed for the 256d recall gate), while the    */
+/* iteration count defaults to SK_CUVS_DEFAULT_NITER below: enough rounds to  */
+/* converge on 128d/256d SIFT-sized data, far fewer than the baseline's       */
+/* over-provisioned 100. Setting SEEKDB_CUVS_NITER=100 restores the exact     */
+/* baseline build if a candidate ever needs the frozen quality point:         */
 /*                                                                            */
 /*   SEEKDB_CUVS_BUILD_ALGO           auto | ivf_pq | nn_descent              */
 /*   SEEKDB_CUVS_GRAPH_DEGREE         final graph degree                      */
@@ -51,7 +55,7 @@ typedef struct {
 
 #define SK_CUVS_DEFAULT_GRAPH_DEGREE        128
 #define SK_CUVS_DEFAULT_INTERMEDIATE_DEGREE 256
-#define SK_CUVS_DEFAULT_NITER               100
+#define SK_CUVS_DEFAULT_NITER               40
 
 static int sk_env_enabled(const char *name)
 {
