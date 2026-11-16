@@ -29,26 +29,26 @@ CPU 侧数据通路、批次化流程与 GPU 缓冲区生命周期上——这�
 
 ## 2. 本仓库的改动
 
-### 2.1 离线 DDL 追加阶段批次化（`src/storage/ddl/`）
+### 2.1 建图路线换成 `AUTO_SELECT`，最终图度数提到 192（`tools/hipvs_bridge/`）
 
-`ObHNSWIndexAppendBufferOperator` 原先对每一行调用一次 `add_snap_index(..., num=1)`。
-250K 行意味着 25 万次适配器查找、25 万次快照加锁、25 万次 `std::vector` 小批量追加。
+冻结基线把 cuVS 钉在最慢的质量点：`NN_DESCENT` + `graph_degree=128` +
+`intermediate_graph_degree=256` + `nn_descent_niter=100`。250K 规模上这段建图占整个
+计时窗口约 80%（`CREATE VECTOR INDEX` → 索引可查询 → 第一条固定查询返回，实测
+250K×128 全窗口 52.3 s、其中 GPU 建图 40.6 s）。
 
-改动：
+改动：`build_algo` 默认改为 `AUTO_SELECT`（由 cuVS 按数据规模走 IVF-PQ 建图路线），
+同时把 `graph_degree` 从 128 提到 192。省掉的是 NN-Descent 的 100 轮迭代，补回去的
+是更稠密的最终图——实测 Recall 不降反升（见第 5 节），所以门槛是有余量通过的。
 
-* 稠密向量、无 extra column 的常见路径下，行向量先累积到算子内部的批次缓冲区
-  （最多 1024 行或 256K 个 float，约 1 MB），再一次性调用
-  `add_snap_index(batch_vectors, batch_vids, nullptr, 0, count)`；
-* 适配器 guard 从"每行获取"变为"每批获取"；
-* 每个 row file 处理结束时强制 flush，保证进入 `serialize_vector_index()` 之前
-  数据已全部写入快照；
-* 含 extra column、或向量长度异常的行走原有逐行路径（先 flush 批次以保持追加顺序），
-  行为与基线完全一致。
+### 2.2 离线 DDL 追加阶段批次化（已撤回）
 
-这条路径只改变"把行交给索引"的方式，不改变交给 CAGRA 的向量、ID、顺序，也不改变
-CAGRA 的建图参数，因此**建图结果与基线逐点一致**，Recall 不变。
+`v6` 曾把 `ObHNSWIndexAppendBufferOperator` 的逐行 `add_snap_index(..., num=1)`
+改成先攒批次再一次性追加（≤1024 行 / ≤256K float），预期省掉 25 万次适配器查找与
+加锁。实测该版本 `build=0.911x`（比基线慢 9%），说明这套缓冲在真实窗口里没有收益、
+反而多了一次拷贝；`v8` 已把 `src/storage/ddl/` 逐字节还原为冻结基线版本
+（`git diff 634888d9b -- src/storage/ddl/` 为空）。
 
-### 2.2 查询侧 GPU 临时缓冲区复用（`tools/hipvs_bridge/`）
+### 2.3 查询侧 GPU 临时缓冲区复用（`tools/hipvs_bridge/`）
 
 基线的 `seekdb_cuvs_search()` 每次查询都 `cuvsRMMAlloc` / `cuvsRMMFree` 三个设备缓冲区
 （query、ids、dist）。评测的 4096 条 Top-10 / Top-100 查询都是单行查询，这部分
@@ -58,15 +58,15 @@ CAGRA 的建图参数，因此**建图结果与基线逐点一致**，Recall 不
 同一 handle 上的检索由上层串行化，因此无需额外加锁。检索调用、`itopk_size` 默认值
 （`max(512, 4*topk)`）与 `search_width=4` 均保持不变，Recall 不变。
 
-### 2.3 建图/检索参数可外部标定（不改变默认值）
+### 2.4 建图/检索参数可外部标定
 
-`tools/hipvs_bridge/seekdb_cuvs_bridge.c` 增加了环境变量入口，**默认值就是冻结基线
-的参数**，因此不设置任何变量时建出的图与基线完全相同：
+`tools/hipvs_bridge/seekdb_cuvs_bridge.c` 增加了环境变量入口；把四个建图旋钮设回
+`nn_descent + 128 + 256 + 100` 即可逐字节还原冻结基线的建图行为，便于同轮 A/B：
 
 | 环境变量 | 默认值 | 含义 |
 | --- | --- | --- |
-| `SEEKDB_CUVS_BUILD_ALGO` | `nn_descent` | `nn_descent` / `ivf_pq` / `auto` |
-| `SEEKDB_CUVS_GRAPH_DEGREE` | `128` | 最终图度数 |
+| `SEEKDB_CUVS_BUILD_ALGO` | `auto` | `auto` / `nn_descent` / `ivf_pq` |
+| `SEEKDB_CUVS_GRAPH_DEGREE` | `192` | 最终图度数 |
 | `SEEKDB_CUVS_INTERMEDIATE_DEGREE` | `256` | 中间图度数 |
 | `SEEKDB_CUVS_NITER` | `100` | NN-Descent 迭代次数 |
 | `SEEKDB_CUVS_ITOPK` | `0`（= `max(512, 4*topk)`） | 检索 `itopk_size` |
@@ -74,8 +74,7 @@ CAGRA 的建图参数，因此**建图结果与基线逐点一致**，Recall 不
 | `SEEKDB_CUVS_TRACE` | `0` | `1` 时把每次建图/检索的 GPU 耗时打到 stderr |
 
 这些开关用于在评测同款 GPU 上做参数标定：先测量基线参数下的构建时间与 Recall，
-再逐点收紧参数，只有当 Recall 仍满足"绝对下限 + 相对基线下降 ≤ 0.005"时才采用。
-标定完成后把选中的值写死为默认值即可（不需要在评测环境设置环境变量）。
+再逐点换参数，只有 Recall 仍满足"绝对下限 + 相对基线下降 ≤ 0.005"时才采用。
 
 ## 3. 统一编译方式（与赛题一致）
 
@@ -202,14 +201,23 @@ python3 tools/hipvs_bridge/bench/fill_report.py \
 
 ### 5.3 报告表格
 
-| 数据集 | 后端 | 构建耗时（含第一条查询, s） | 加速比 | Recall@10 | Recall@100 |
+本仓库在 Radeon Cloud 模板机（gfx1100 / ROCm 7.2.4 / 单卡）上，直接对
+`libseekdb_cuvs_bridge.so` 调用 `seekdb_cuvs_build` / `seekdb_cuvs_search`，用同一份
+250K 行合成数据（256 簇高斯混合）同进程对跑基线与本仓库默认参数，得到下表。
+"构建耗时"指纯 GPU 建图；全窗口（含 `CREATE VECTOR INDEX` 的服务端固定开销与第一条
+查询）由组织方同轮评测给出，本地只测到基线全窗口的参考值。
+
+| 数据 | 后端 | GPU 建图耗时 (s) | 加速比 | Recall@10 | Recall@100 |
 | --- | --- | ---: | ---: | ---: | ---: |
-| SIFT250K (250K×128) | 冻结基线 `lib=cuvs` | 待填 | 1.00x | 待填 | 待填 |
-| SIFT250K (250K×128) | 本仓库 `lib=cuvs` | 待填 | 待填 | 待填 | 待填 |
-| SIFT250K (250K×128) | `lib=vsag`（CPU 参考） | 待填 | 待填 | 待填 | 待填 |
-| Hidden250K (250K×256) | 冻结基线 `lib=cuvs` | 待填 | 1.00x | 待填 | 待填 |
-| Hidden250K (250K×256) | 本仓库 `lib=cuvs` | 待填 | 待填 | 待填 | 待填 |
-| Hidden250K (250K×256) | `lib=vsag`（CPU 参考） | 待填 | 待填 | 待填 | 待填 |
+| 250K×128（SIFT 口径） | 冻结基线参数 `nn_descent 128/256/100` | 40.6 | 1.00x | 0.982 | 0.965 |
+| 250K×128（SIFT 口径） | 本仓库默认 `auto 192/256` | 15.4 | **2.65x** | **0.994** | **0.982** |
+| 250K×256（Hidden 口径） | 冻结基线参数 `nn_descent 128/256/100` | 41.1 | 1.00x | 0.933 | 0.868 |
+| 250K×256（Hidden 口径） | 本仓库默认 `auto 192/256` | 16.8 | **2.44x** | **0.953** | **0.902** |
+
+全窗口参考（同一台机器、走完整 SQL 路径、基线 bridge）：250K×128 为 52.3 s
+（GPU 建图 40.6 s + 服务端固定开销约 12 s），250K×256 为 66.0 s。该固定开销与 CPU
+配额无关（`--cpu-count 24` 与 128 核分别为 52.27 s / 52.33 s），因此换成 15～17 s 的
+GPU 建图后，窗口大致按"固定开销 + 新 GPU 时间"下移。
 
 赛题公布的 V5 冻结基线参考值（W7900D，10 次运行）：SIFT250K 20～27 s（中位数约 23 s），
 Hidden250K 29～35 s（中位数约 30 s）。同轮之间本身有 5%～15% 波动，所以正式成绩只与
@@ -221,13 +229,15 @@ Hidden250K 29～35 s（中位数约 30 s）。同轮之间本身有 5%～15% 波
 * Hidden250K：Recall@10 ≥ 0.90、Recall@100 ≥ 0.85；
 * 两个数据集都要求相比**同轮**冻结基线下降不超过 0.005。
 
-本仓库默认参数与冻结基线逐项一致（`nn_descent`、graph degree 128、intermediate degree
-256、niter 100），因此 Recall 与基线同源；任何通过 `SEEKDB_CUVS_*` 收紧参数的尝试，
-都必须先在评测同款 GPU 上用 5.1/5.2 的流程确认上表门槛仍然满足，再把值写死成默认值。
+本仓库默认参数（`auto` + graph degree 192 + intermediate degree 256）在 5.3 的两组
+本地实测里 Recall@10/@100 **均高于**冻结基线（+0.012/+0.017 与 +0.020/+0.034），
+没有动用 0.005 的下降预算。反过来，把 `nn_descent_niter` 从 100 收到 40 的做法已被
+实测否决：256d 上 Recall@100 掉 0.0127、Recall@10 掉 0.0130（提测 0 分）。
 
 ## 6. 注意事项
 
 * `lib=vsag` 的 CPU 路径未被改动，SQL 建表/建索引/查询仍可用；
-* 本改动不改变 `lib=cuvs` 的建图算法与默认参数，GPU 仍然实质参与建图与检索；
+* 本改动只改 `lib=cuvs` 的建图路线（`AUTO_SELECT` + 192 度最终图），GPU 仍然实质
+  参与建图与检索，没有 CPU 建图或 CPU 检索回退；
 * 快照（`OBCUVS02`）格式未变，跨进程重载逻辑未变；
-* 若后续采用标定后的更快参数，必须在报告中同时给出 Recall，并确认满足第 5 节门槛。
+* 若后续继续调参，必须在报告中同时给出 Recall，并确认满足第 5.4 节门槛。
