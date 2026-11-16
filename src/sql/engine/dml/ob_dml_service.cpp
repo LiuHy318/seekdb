@@ -1093,7 +1093,11 @@ int ObDMLService::update_row(const ObUpdCtDef &upd_ctdef,
                 "new row", ROWEXPR2STR(dml_rtctx.get_eval_ctx(), upd_ctdef.new_row_));
     }
   }
-  if (OB_SUCC(ret) && OB_NOT_NULL(old_row) && OB_NOT_NULL(new_row)) {
+  // A row that did not change is only locked, the insert ctdef of the update is
+  // not prepared in this situation.
+  if (OB_SUCC(ret) && upd_rtdef.is_row_changed_
+      && OB_NOT_NULL(upd_ctdef.dins_ctdef_)
+      && OB_NOT_NULL(old_row) && OB_NOT_NULL(new_row)) {
     ObSQLSessionInfo *ai_session = dml_rtctx.get_exec_ctx().get_my_session();
     const uint64_t ai_tx_id = (NULL != ai_session)
         ? static_cast<uint64_t>(ai_session->get_tx_id().get_id()) : 0;

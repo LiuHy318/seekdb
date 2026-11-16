@@ -50,6 +50,10 @@ public:
   virtual ~ObAlterTableResolver();
   virtual int resolve(const ParseNode &parse_tree);
   int resolve_action_list(const ParseNode &node);
+  // RETRY AI COLUMN <col> [WHERE ...]: run the retry while resolving, the
+  // statement itself does not change the schema.
+  int check_retry_ai_column_action(const ParseNode &parse_tree, bool &is_retry);
+  int resolve_retry_ai_column(const ParseNode &parse_tree);
   int resolve_column_options(const ParseNode &node,
                              bool &is_modify_column_visibility,
                              bool &is_drop_column,

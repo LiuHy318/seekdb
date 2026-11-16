@@ -85,6 +85,14 @@ protected:
                             const share::schema::ObColumnSchemaV2 &column,
                             bool &need_assign);
 
+  // Add an implicit "ai_column = null" assignment when the update changes one of
+  // the dependencies (or the primary key) of an AI column that owns a vector
+  // index, so that the vector index maintenance is attached to the dml task.
+  int add_ai_column_invalidation_assignments(const TableItem &table_item,
+                                             const share::schema::ObTableSchema &table_schema,
+                                             share::schema::ObSchemaGetterGuard &schema_guard,
+                                             ObTableAssignment &table_assign);
+
   int set_base_table_for_updatable_view(TableItem &table_item,
                                         const ObColumnRefRawExpr &col_ref,
                                         const bool log_error = true);

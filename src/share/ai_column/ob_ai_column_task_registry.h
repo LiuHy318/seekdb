@@ -115,6 +115,10 @@ public:
   // Number of rows of (table, column) whose AI value is still missing.
   static int get_pending_count(const uint64_t table_id, const uint64_t column_id,
                                int64_t &pending);
+  // A statement wrote a non null value for the AI column of this row: the row
+  // is complete again.
+  static int mark_present(const uint64_t table_id, const uint64_t column_id,
+                          const char *rowkey_pred);
   static int64_t get_count();
 
 private:
@@ -140,43 +144,87 @@ private:
     return &s_count;
   }
 
-  // Column level counter of rows whose AI value is still missing.  It is
-  // incremented when a task row is created and decremented when the row has
-  // been computed, so it also covers rows whose task was dropped after a
-  // terminal failure (their AI value stays NULL, hence the column stays
-  // incomplete).
-  struct ColumnPending
+  // Rows of an ai column whose value is still missing.  The marker survives the
+  // removal of the task row (a terminal failure leaves the value NULL), so a
+  // later retry of the same row is not counted twice even though the task row is
+  // gone by then.
+  struct MissingRow
   {
     uint64_t table_id_;
     uint64_t column_id_;
-    int64_t pending_;
+    char rowkey_pred_[AI_TASK_ROWKEY_LEN];
   };
-  static const int64_t MAX_PENDING_SLOTS = 64;
-  static ColumnPending *pending_counter()
+  static const int64_t MAX_MISSING_ROWS = AI_TASK_MAX_ENTRIES;
+  static MissingRow *missing_rows()
   {
-    static ColumnPending s_pending[MAX_PENDING_SLOTS];
-    return s_pending;
+    static MissingRow s_rows[MAX_MISSING_ROWS];
+    return s_rows;
   }
-  static void bump_pending(const uint64_t table_id, const uint64_t column_id,
-                           const int64_t delta)
+  // caller must hold the lock
+  static int64_t find_missing(const uint64_t table_id, const uint64_t column_id,
+                              const char *rowkey_pred)
   {
-    ColumnPending *slots = pending_counter();
-    int64_t free_slot = -1;
-    for (int64_t i = 0; i < MAX_PENDING_SLOTS; ++i) {
-      if (slots[i].table_id_ == table_id && slots[i].column_id_ == column_id) {
-        slots[i].pending_ += delta;
-        if (slots[i].pending_ < 0) {
-          slots[i].pending_ = 0;
-        }
-        return;
-      } else if (0 == slots[i].table_id_ && free_slot < 0) {
-        free_slot = i;
+    int64_t idx = -1;
+    MissingRow *rows = missing_rows();
+    for (int64_t i = 0; i < MAX_MISSING_ROWS && idx < 0; ++i) {
+      if (0 != rows[i].table_id_ && rows[i].table_id_ == table_id
+          && rows[i].column_id_ == column_id
+          && 0 == strncmp(rows[i].rowkey_pred_, rowkey_pred, AI_TASK_ROWKEY_LEN - 1)) {
+        idx = i;
       }
     }
-    if (free_slot >= 0) {
-      slots[free_slot].table_id_ = table_id;
-      slots[free_slot].column_id_ = column_id;
-      slots[free_slot].pending_ = (delta > 0) ? delta : 0;
+    return idx;
+  }
+  // caller must hold the lock
+  static void mark_missing(const uint64_t table_id, const uint64_t column_id,
+                           const char *rowkey_pred)
+  {
+    if (NULL == rowkey_pred || find_missing(table_id, column_id, rowkey_pred) >= 0) {
+      // already counted
+    } else {
+      MissingRow *rows = missing_rows();
+      for (int64_t i = 0; i < MAX_MISSING_ROWS; ++i) {
+        if (0 == rows[i].table_id_) {
+          rows[i].table_id_ = table_id;
+          rows[i].column_id_ = column_id;
+          copy_cstr(rows[i].rowkey_pred_, AI_TASK_ROWKEY_LEN, rowkey_pred);
+          break;
+        }
+      }
+    }
+  }
+  // caller must hold the lock
+  static void unmark_missing(const uint64_t table_id, const uint64_t column_id,
+                             const char *rowkey_pred)
+  {
+    if (NULL != rowkey_pred) {
+      const int64_t idx = find_missing(table_id, column_id, rowkey_pred);
+      if (idx >= 0) {
+        memset(static_cast<void *>(&missing_rows()[idx]), 0, sizeof(MissingRow));
+      }
+    }
+  }
+  // caller must hold the lock: forget every missing marker of one row
+  static void unmark_row(const uint64_t table_id, const char *rowkey_pred)
+  {
+    if (NULL != rowkey_pred) {
+      MissingRow *rows = missing_rows();
+      for (int64_t i = 0; i < MAX_MISSING_ROWS; ++i) {
+        if (0 != rows[i].table_id_ && rows[i].table_id_ == table_id
+            && 0 == strncmp(rows[i].rowkey_pred_, rowkey_pred, AI_TASK_ROWKEY_LEN - 1)) {
+          memset(static_cast<void *>(&rows[i]), 0, sizeof(MissingRow));
+        }
+      }
+    }
+  }
+  // caller must hold the lock
+  static void unmark_table(const uint64_t table_id)
+  {
+    MissingRow *rows = missing_rows();
+    for (int64_t i = 0; i < MAX_MISSING_ROWS; ++i) {
+      if (rows[i].table_id_ == table_id) {
+        memset(static_cast<void *>(&rows[i]), 0, sizeof(MissingRow));
+      }
     }
   }
   // caller must hold the lock
@@ -284,7 +332,6 @@ inline int ObAiColumnTaskRegistry::add_task(ObAiColumnTaskEntry &entry)
           && arr[i].column_id_ == entry.column_id_
           && same_rowkey(arr[i], entry.rowkey_pred_)) {
         clear_entry(arr[i]);
-        ++replaced_cnt;
         if (*count() > 0) {
           --(*count());
         }
@@ -294,7 +341,6 @@ inline int ObAiColumnTaskRegistry::add_task(ObAiColumnTaskEntry &entry)
     if (common::OB_SUCCESS == ret) {
       ret = alloc_slot(slot);
     }
-    const bool is_new_row = (0 == replaced_cnt);
     if (common::OB_SUCCESS == ret) {
       const int64_t now = common::ObTimeUtility::current_time();
       entry.task_id_ = ATOMIC_AAF(id_seq(), 1);
@@ -310,9 +356,7 @@ inline int ObAiColumnTaskRegistry::add_task(ObAiColumnTaskEntry &entry)
       entry.error_msg_[0] = '\0';
       arr[slot] = entry;
       ++(*count());
-      if (0 == replaced_cnt) {
-        bump_pending(entry.table_id_, entry.column_id_, 1);
-      }
+      mark_missing(entry.table_id_, entry.column_id_, entry.rowkey_pred_);
     }
   }
   unlock();
@@ -349,13 +393,13 @@ inline int ObAiColumnTaskRegistry::remove_by_rowkey(const uint64_t table_id,
       for (int64_t i = 0; i < AI_TASK_MAX_ENTRIES; ++i) {
         if (0 != arr[i].task_id_ && arr[i].table_id_ == table_id
             && same_rowkey(arr[i], rowkey_pred)) {
-          bump_pending(arr[i].table_id_, arr[i].column_id_, -1);
           clear_entry(arr[i]);
           if (*count() > 0) {
             --(*count());
           }
         }
       }
+      unmark_row(table_id, rowkey_pred);
     }
     unlock();
   }
@@ -376,6 +420,7 @@ inline int ObAiColumnTaskRegistry::remove_by_table(const uint64_t table_id)
         }
       }
     }
+    unmark_table(table_id);
   }
   unlock();
   return ret;
@@ -482,7 +527,8 @@ inline int ObAiColumnTaskRegistry::mark_done(const int64_t task_id)
   {
     const int64_t idx = find_index(task_id);
     if (idx >= 0) {
-      bump_pending(entries()[idx].table_id_, entries()[idx].column_id_, -1);
+      unmark_missing(entries()[idx].table_id_, entries()[idx].column_id_,
+                     entries()[idx].rowkey_pred_);
       clear_entry(entries()[idx]);
       if (*count() > 0) {
         --(*count());
@@ -569,18 +615,33 @@ inline int ObAiColumnTaskRegistry::get_task(const int64_t task_id, ObAiColumnTas
   return ret;
 }
 
+inline int ObAiColumnTaskRegistry::mark_present(const uint64_t table_id,
+                                                const uint64_t column_id,
+                                                const char *rowkey_pred)
+{
+  int ret = common::OB_SUCCESS;
+  lock();
+  unmark_missing(table_id, column_id, rowkey_pred);
+  unlock();
+  return ret;
+}
+
 inline int ObAiColumnTaskRegistry::get_pending_count(const uint64_t table_id,
                                                      const uint64_t column_id,
                                                      int64_t &pending)
 {
   int ret = common::OB_SUCCESS;
   pending = 0;
-  ColumnPending *slots = pending_counter();
-  for (int64_t i = 0; i < MAX_PENDING_SLOTS; ++i) {
-    if (slots[i].table_id_ == table_id && slots[i].column_id_ == column_id) {
-      pending = slots[i].pending_;
+  lock();
+  {
+    MissingRow *rows = missing_rows();
+    for (int64_t i = 0; i < MAX_MISSING_ROWS; ++i) {
+      if (rows[i].table_id_ == table_id && rows[i].column_id_ == column_id) {
+        ++pending;
+      }
     }
   }
+  unlock();
   return ret;
 }
 

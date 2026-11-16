@@ -319,8 +319,12 @@ inline int ObAiColumnRowObserver::observe_insert_or_update(const common::ObDatum
       const share::ai_column::ObAiColumnMeta &col = meta_.columns_[i];
       int64_t idx = -1;
       if (OB_FAIL(find_column_idx(col.column_id_, idx))) {
-      } else if (idx < 0 || idx >= count || !datums[idx].is_null()) {
-        // the AI value is provided by the statement itself, nothing to do
+      } else if (idx < 0 || idx >= count) {
+        continue;
+      } else if (!datums[idx].is_null()) {
+        // the AI value is provided by the statement itself: the row is complete
+        share::ai_column::ObAiColumnTaskRegistry::mark_present(
+            meta_.display_table_id_, col.column_id_, predicate.ptr());
         continue;
       } else {
         bool need_task = false;
