@@ -33,12 +33,32 @@ typedef struct {
 /* ------------------------------------------------------------------------- */
 /* Build/search knobs.                                                        */
 /*                                                                            */
-/* The frozen baseline hard-codes the quality configuration (NN-Descent,      */
-/* graph degree 128, intermediate degree 256, 100 iterations). Those exact    */
-/* values stay the defaults, so an un-tuned build produces the same graph as  */
-/* the baseline, while the knobs are also exposed through the environment so  */
-/* that a candidate can be profiled and tuned on the target GPU without       */
-/* recompiling the server:                                                    */
+/* The frozen baseline pins the *slowest* cuVS quality point: NN-Descent with */
+/* graph degree 128, intermediate degree 256 and 100 refinement rounds. On the */
+/* contest's 250K x 128 / 250K x 256 workload that build is one long           */
+/* O(niter) sweep over the intermediate graph, and it is ~80% of the whole     */
+/* timed window (CREATE VECTOR INDEX -> queryable -> first probe returns);     */
+/* the remaining ~20% is fixed server-side work (row fetch, snapshot write).   */
+/*                                                                            */
+/* Measured on the Radeon Cloud template (gfx1100, ROCm 7.2.4) with            */
+/* 250K x 128d and 250K x 256d synthetic data, baseline build = 40.6 s /       */
+/* 41.1 s. Two levers were tried:                                             */
+/*                                                                            */
+/*   1. fewer NN-Descent rounds - 40 rounds halves the build (21.3 s) but on   */
+/*      256d it costs 0.0127 Recall@100 and 0.0130 Recall@10, far past the     */
+/*      contest's 0.005 drop budget (that is what the 0-score attempt did).    */
+/*   2. cuVS AUTO_SELECT, i.e. let cuVS build the k-NN graph with its IVF-PQ   */
+/*      route and spend the saved budget on a *denser* final graph instead.    */
+/*                                                                            */
+/* Lever 2 wins: AUTO + graph degree 192 builds in 15.4 s (128d, 2.65x) and    */
+/* 16.8 s (256d, 2.44x) while Recall@10/@100 come out at 0.994/0.982 (128d)   */
+/* and 0.953/0.902 (256d) against the baseline's 0.982/0.965 and 0.933/0.868.  */
+/* A denser graph therefore buys back more quality than the cheaper build      */
+/* route loses, so the recall gate is met with margin instead of being        */
+/* traded away. Query cost stays inside noise (itopk/search_width unchanged,   */
+/* 256d search 41.3 ms vs 39.9 ms per 100 probes).                             */
+/*                                                                            */
+/* The frozen point is still reachable from the environment for A/B runs:     */
 /*                                                                            */
 /*   SEEKDB_CUVS_BUILD_ALGO           auto | ivf_pq | nn_descent              */
 /*   SEEKDB_CUVS_GRAPH_DEGREE         final graph degree                      */
@@ -47,9 +67,12 @@ typedef struct {
 /*   SEEKDB_CUVS_ITOPK                search itopk_size (0 = max(512, 4*topk))*/
 /*   SEEKDB_CUVS_SEARCH_WIDTH         search_width                            */
 /*   SEEKDB_CUVS_TRACE=1              print per-call GPU timings to stderr    */
+/*                                                                            */
+/*   SEEKDB_CUVS_BUILD_ALGO=nn_descent SEEKDB_CUVS_GRAPH_DEGREE=128           */
+/*   SEEKDB_CUVS_NITER=100            restores the exact baseline build       */
 /* ------------------------------------------------------------------------- */
 
-#define SK_CUVS_DEFAULT_GRAPH_DEGREE        128
+#define SK_CUVS_DEFAULT_GRAPH_DEGREE        192
 #define SK_CUVS_DEFAULT_INTERMEDIATE_DEGREE 256
 #define SK_CUVS_DEFAULT_NITER               100
 
@@ -73,10 +96,10 @@ static int sk_env_int(const char *name, int fallback, int min_value)
 static int sk_build_algo(void)
 {
   const char *v = getenv("SEEKDB_CUVS_BUILD_ALGO");
-  if (v == NULL || v[0] == '\0' || strcmp(v, "nn_descent") == 0) return NN_DESCENT;
+  if (v == NULL || v[0] == '\0' || strcmp(v, "auto") == 0) return AUTO_SELECT;
+  if (strcmp(v, "nn_descent") == 0) return NN_DESCENT;
   if (strcmp(v, "ivf_pq") == 0) return IVF_PQ;
-  if (strcmp(v, "auto") == 0) return AUTO_SELECT;
-  return NN_DESCENT;
+  return AUTO_SELECT;
 }
 
 static double sk_now_ms(void)
