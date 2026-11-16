@@ -21,9 +21,17 @@
 
 namespace oceanbase
 {
+namespace share
+{
+namespace ai_column
+{
+struct ObAiColumnTableMeta;
+}
+}
 namespace sql
 {
 class ObSQLSessionInfo;
+class ObDMLStmt;
 
 /// the interface of this module
 class ObResolver
@@ -47,6 +55,12 @@ private:
 
   template <typename SelectResolverType>
   int select_stmt_resolver_func(ObResolverParams &params, const ParseNode &parse_tree, ObStmt *&stmt);
+
+  // Reject a statement that reads an AI column which still has rows whose value
+  // has not been computed, when the session enables ai_column_strict_read.
+  int check_ai_column_strict_read(ObDMLStmt *stmt);
+  int check_ai_column_strict_read_stmt(const ObDMLStmt &stmt, const int64_t depth,
+                                       share::ai_column::ObAiColumnTableMeta &meta);
 private:
   // data members
   ObResolverParams params_;

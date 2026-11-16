@@ -38,6 +38,10 @@ class ObColumnSchemaV2;
 class ObTableSqlService : public ObDDLSqlService
 {
 public:
+  int insert_ai_column_metadata_for_table(common::ObISQLClient &sql_client,
+                                         const ObTableSchema &table);
+  int check_ai_column_dimension(const ObTableSchema &table);
+  int check_ai_column_dependency(const ObTableSchema &table);
   ObTableSqlService(ObSchemaService &schema_service,
                     ObMultiVersionSchemaService &multi_version_schema_service)
     : ObDDLSqlService(schema_service),
@@ -362,6 +366,11 @@ private:
   int add_columns_dml(const ObTableSchema &table,
       share::ObDMLSqlSplicer &all_column_dml,
       int64_t &column_count);
+  int insert_ai_column_metadata(common::ObISQLClient &sql_client,
+                                 const common::ObIArray<ObTableSchema> &tables);
+  int insert_ai_column_metadata(common::ObISQLClient &sql_client,
+                                 const ObTableSchema &table,
+                                 const ObColumnSchemaV2 &column);
   int batch_add_columns_for_create_table(common::ObISQLClient &sql_client,
       const ObIArray<ObTableSchema> &table);
   int add_columns_for_core(common::ObISQLClient &sql_client, const ObTableSchema &table);

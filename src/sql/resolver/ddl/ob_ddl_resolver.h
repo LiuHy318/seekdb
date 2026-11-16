@@ -547,6 +547,9 @@ protected:
                                          ObColumnResolveStat &reslove_stat);
   int resolve_srid_node(share::schema::ObColumnSchemaV2 &column,
                         const ParseNode &srid_node);
+  int resolve_ai_column_attribute(ObColumnSchemaV2 &column,
+                                   ParseNode *ai_expr_node,
+                                   ParseNode *ai_opts_node);
   int resolve_column_skip_index(
       const ParseNode &skip_index_node,
       share::schema::ObColumnSchemaV2 &column_schema);

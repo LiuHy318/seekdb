@@ -93,7 +93,11 @@
 #include "sql/resolver/expr/ob_raw_expr_wrap_enum_set.h"
 #include "sql/resolver/cmd/ob_get_diagnostics_resolver.h"
 #include "sql/resolver/dcl/ob_alter_role_resolver.h"
+#include "sql/resolver/dml/ob_dml_stmt.h"
 #include "sql/pl/ob_pl_package.h"
+#include "share/ai_column/ob_ai_column_meta_cache.h"
+#include "share/ai_column/ob_ai_column_task_registry.h"
+#include "share/system_variable/ob_sys_var_class_type.h"
 
 namespace oceanbase
 {
@@ -665,6 +669,11 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
       }
 
     }
+    if (OB_SUCC(ret) && OB_NOT_NULL(stmt) && stmt->is_dml_stmt() && !stmt->is_explain_stmt()) {
+      if (OB_FAIL(check_ai_column_strict_read(static_cast<ObDMLStmt *>(stmt)))) {
+        LOG_WARN("reject statement that reads an unfinished ai column", K(ret));
+      }
+    }
     if (OB_SUCC(ret)) {
       stmt::StmtType stmt_type = stmt->get_stmt_type();
       if (ObStmt::is_ddl_stmt(stmt_type, stmt->has_global_variable()) || ObStmt::is_dcl_stmt(stmt_type)) {
@@ -679,6 +688,85 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
       }
     }
   }  // end if
+  return ret;
+}
+
+int ObResolver::check_ai_column_strict_read(ObDMLStmt *stmt)
+{
+  int ret = OB_SUCCESS;
+  int64_t strict_read = 0;
+  share::ai_column::ObAiColumnTableMeta meta;
+  if (OB_ISNULL(stmt) || OB_ISNULL(params_.session_info_)) {
+    ret = OB_NOT_INIT;
+  } else if (!stmt->is_dml_stmt() || stmt->is_explain_stmt()) {
+    // nothing to check
+  } else if (OB_FAIL(params_.session_info_->get_sys_variable(
+                 share::SYS_VAR_AI_COLUMN_STRICT_READ, strict_read))) {
+    LOG_WARN("failed to read ai_column_strict_read, skip the check", K(ret));
+    ret = OB_SUCCESS;
+  } else if (0 == strict_read) {
+    // strict read is off
+  } else if (OB_FAIL(check_ai_column_strict_read_stmt(*stmt, 0, meta))) {
+    LOG_INFO("ai column strict read check failed", K(ret));
+  }
+  return ret;
+}
+
+int ObResolver::check_ai_column_strict_read_stmt(const ObDMLStmt &stmt, const int64_t depth,
+                                                 share::ai_column::ObAiColumnTableMeta &meta)
+{
+  int ret = OB_SUCCESS;
+  if (depth > 8) {
+    // avoid pathological nesting
+  } else {
+    const common::ObIArray<ColumnItem> &items = stmt.get_column_items();
+    for (int64_t i = 0; OB_SUCC(ret) && i < items.count(); ++i) {
+      const ColumnItem &item = items.at(i);
+      const TableItem *table_item = stmt.get_table_item_by_id(item.table_id_);
+      bool found = false;
+      if (OB_ISNULL(table_item)) {
+        // column of an index table or of a removed table item
+      } else if (OB_FAIL(share::ai_column::ObAiColumnMetaCache::get(
+                     table_item->get_base_table_item().ref_id_, meta, found))) {
+        LOG_WARN("failed to load ai column meta", K(ret));
+      } else if (!found) {
+        // not an ai column table
+      } else {
+        for (int64_t c = 0; OB_SUCC(ret) && c < meta.column_count_; ++c) {
+          if (item.base_cid_ != meta.columns_[c].column_id_) {
+            // not an ai column
+          } else {
+            int64_t pending = 0;
+            if (OB_FAIL(share::ai_column::ObAiColumnTaskRegistry::get_pending_count(
+                           meta.display_table_id_, meta.columns_[c].column_id_, pending))) {
+            } else if (pending > 0) {
+              LOG_USER_ERROR(OB_ERR_AI_COLUMN_NOT_READY, meta.display_table_id_,
+                             meta.columns_[c].column_id_);
+              LOG_INFO("ai column strict read rejected", K(pending),
+                       "table_id", meta.display_table_id_,
+                       "column_id", meta.columns_[c].column_id_);
+              ret = OB_ERR_AI_COLUMN_NOT_READY;
+            }
+          }
+        }
+      }
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < stmt.get_subquery_expr_size(); ++i) {
+      const ObQueryRefRawExpr *query_ref = stmt.get_subquery_exprs().at(i);
+      const ObSelectStmt *sub_stmt = (NULL != query_ref) ? query_ref->get_ref_stmt() : NULL;
+      if (NULL != sub_stmt
+          && OB_FAIL(SMART_CALL(check_ai_column_strict_read_stmt(*sub_stmt, depth + 1, meta)))) {
+      }
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < stmt.get_table_size(); ++i) {
+      const TableItem *table_item = stmt.get_table_item(i);
+      if (NULL != table_item && table_item->is_generated_table()
+          && NULL != table_item->ref_query_
+          && OB_FAIL(SMART_CALL(check_ai_column_strict_read_stmt(
+                         *table_item->ref_query_, depth + 1, meta)))) {
+      }
+    }
+  }
   return ret;
 }
 

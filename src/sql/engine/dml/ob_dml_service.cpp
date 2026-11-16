@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "config_bridge.h"
+#include "sql/das/ob_das_ai_column_observer.h"
 #include "sql/engine/dml/ob_dml_service.h"
 #include "sql/engine/expr/ob_datum_cast.h"
 #include "share/rc/ob_server_runtime.h"
@@ -1092,6 +1093,16 @@ int ObDMLService::update_row(const ObUpdCtDef &upd_ctdef,
                 "new row", ROWEXPR2STR(dml_rtctx.get_eval_ctx(), upd_ctdef.new_row_));
     }
   }
+  // A row that did not change is only locked, the insert ctdef of the update is
+  // not prepared in this situation.
+  if (OB_SUCC(ret) && upd_rtdef.is_row_changed_
+      && OB_NOT_NULL(upd_ctdef.dins_ctdef_)
+      && OB_NOT_NULL(old_row) && OB_NOT_NULL(new_row)) {
+    ObSQLSessionInfo *ai_session = dml_rtctx.get_exec_ctx().get_my_session();
+    const uint64_t ai_tx_id = (NULL != ai_session)
+        ? static_cast<uint64_t>(ai_session->get_tx_id().get_id()) : 0;
+    observe_ai_column_update_row(*upd_ctdef.dins_ctdef_, ai_tx_id, *old_row, *new_row);
+  }
   return ret;
 }
 
@@ -1777,6 +1788,16 @@ int ObDMLService::write_row_to_das_op(const ObDASDMLBaseCtDef &ctdef,
     }
   } else {
     // serialize submit
+  }
+  if (OB_SUCC(ret) && OB_NOT_NULL(stored_row)) {
+    ObSQLSessionInfo *ai_session = dml_rtctx.get_exec_ctx().get_my_session();
+    const uint64_t ai_tx_id = (NULL != ai_session)
+        ? static_cast<uint64_t>(ai_session->get_tx_id().get_id()) : 0;
+    const ObAiColumnDmlMode ai_mode = (DAS_OP_TABLE_DELETE == N)
+        ? AI_COLUMN_DML_DELETE
+        : (DAS_OP_TABLE_UPDATE == N) ? AI_COLUMN_DML_UPDATE : AI_COLUMN_DML_INSERT;
+    observe_ai_column_datums(ctdef, ai_tx_id, ai_mode,
+                             stored_row->cells(), stored_row->cnt_);
   }
   return ret;
 }

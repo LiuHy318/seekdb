@@ -2447,6 +2447,37 @@ all_ai_model_endpoint_def = dict(
 def_table_schema(**all_ai_model_endpoint_def)
 
 
+all_ai_column_def = dict(
+    owner = 'database-competition',
+    table_name = '__all_ai_column',
+    table_id = '1131',
+    table_type = 'SYSTEM_TABLE',
+    gm_columns = ['gmt_create', 'gmt_modified'],
+    rowkey_columns = [
+      ('table_id', 'int'),
+      ('column_id', 'int')
+    ],
+
+    is_cluster_private = False,
+    meta_record_in_sys = False,
+    normal_columns = [
+        ('column_name', 'varchar:128', 'true'),
+        ('sync_mode', 'varchar:16', 'true'),
+        ('max_retries', 'int', 'true'),
+        ('state_column_id', 'int', 'true'),
+        ('request_column_id', 'int', 'true'),
+        ('result_spec_column_id', 'int', 'true'),
+        ('normalized_expr', 'longtext', 'true'),
+        ('expression', 'longtext', 'true'),
+        ('dependencies', 'varchar:2048', 'true'),
+        ('definition_version', 'int', 'true')
+    ]
+)
+def_table_schema(**all_ai_column_def)
+
+
+
+
 all_objauth_mysql_def = dict(
     owner = 'cjl476581',
     table_name     = '__all_objauth_mysql',
@@ -2800,6 +2831,36 @@ def_table_schema(
 
 # 11001: __all_virtual_core_meta_table (abandoned)
 # 11002: __all_virtual_zone_stat # abandoned in 4.0.
+
+all_ai_column_task_def = dict(
+    owner = 'cjl476581',
+    table_name = '__all_ai_column_task',
+    table_id = '11002',
+    table_type = 'VIRTUAL_TABLE',
+    gm_columns = [],
+    rowkey_columns = [],
+
+    normal_columns = [
+        ('tenant_id', 'int'),
+        ('task_id', 'int'),
+        ('table_id', 'int'),
+        ('column_id', 'int'),
+        ('database_name', 'varchar:256'),
+        ('table_name', 'varchar:256'),
+        ('column_name', 'varchar:256'),
+        ('row_key', 'varchar:512'),
+        ('rowkey_predicate', 'varchar:1024'),
+        ('state', 'int'),
+        ('retry_count', 'int'),
+        ('max_retries', 'int'),
+        ('request_id', 'varchar:128'),
+        ('eligible_ts', 'timestamp'),
+        ('retry_at', 'timestamp'),
+        ('error_msg', 'varchar:512')
+    ],
+    vtable_route_policy = 'local'
+)
+def_table_schema(**all_ai_column_task_def)
 
 def_table_schema(
   owner = 'xiaoyi.xy',
@@ -14455,3 +14516,4 @@ def_sys_index_table(
 # Agent table Index
 # End Agent table Index
 ################################################################################
+

@@ -23,6 +23,7 @@
 #include "sql/pl/ob_pl_resolver.h"
 #include "sql/parser/parse_malloc.h"
 #include "query/vector/ob_vector_index_util.h"
+#include "share/ai_column/ob_ai_column_meta_cache.h"
 #include "sql/das/ob_domain_id.h"
 
 namespace oceanbase
@@ -513,6 +514,11 @@ int ObDelUpdResolver::resolve_additional_assignments(ObIArray<ObTableAssignment>
       LOG_WARN("fail to get table schema", KPC(table_item), K(table_schema));
     } else if (OB_FAIL(table_schema->has_before_update_row_trigger(*schema_guard, trigger_exist))) {
     } else if (OB_FAIL(generate_wrapper_expr_for_assignemnts(assigns.at(i).assignments_, trigger_exist))) {
+    } else if (T_UPDATE_SCOPE == scope
+               && OB_FAIL(add_ai_column_invalidation_assignments(*table_item,
+                                                                 *table_schema,
+                                                                 *schema_guard,
+                                                                 assigns.at(i)))) {
     } else if (OB_FAIL(check_update_vector_col_with_vector_index(table_schema,
                                                                  schema_guard,
                                                                  assigns.at(i).assignments_,
@@ -695,6 +701,104 @@ int ObDelUpdResolver::add_assignment(common::ObIArray<ObTableAssignment> &assign
 
   if (OB_SUCC(ret) && !found) {
     if (OB_FAIL(table_assign->assignments_.push_back(assign))) {
+    }
+  }
+  return ret;
+}
+
+// An AI column is regenerated as soon as one of its dependencies or one of the
+// primary key columns is part of the update.  The invalidation is applied by the
+// dml side at execution time, but the plan has to know about it in advance:
+// the vector index maintenance of the invalidated column is only attached to the
+// das task when the statement assigns a column of the index, and the index rows
+// are generated from the hidden vec columns that depend on the AI column.  So add
+// an implicit "ai_column = null" assignment here; the generic generated column
+// expansion then produces the hidden vec columns as null as well.
+int ObDelUpdResolver::add_ai_column_invalidation_assignments(
+    const TableItem &table_item,
+    const ObTableSchema &table_schema,
+    ObSchemaGetterGuard &schema_guard,
+    ObTableAssignment &table_assign)
+{
+  int ret = OB_SUCCESS;
+  ObDMLStmt *stmt = get_stmt();
+  share::ai_column::ObAiColumnTableMeta meta;
+  bool found = false;
+  if (OB_ISNULL(stmt) || OB_ISNULL(params_.expr_factory_) || OB_ISNULL(params_.allocator_)) {
+    ret = OB_NOT_INIT;
+  } else if (OB_FAIL(share::ai_column::ObAiColumnMetaCache::get(table_schema.get_table_id(),
+                                                                meta, found))) {
+    LOG_WARN("failed to get ai column meta", K(ret), K(table_schema.get_table_id()));
+  } else if (!found || meta.column_count_ <= 0) {
+    // not an ai column table
+    meta.column_count_ = 0;
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < meta.column_count_; ++i) {
+    const share::ai_column::ObAiColumnMeta &col = meta.columns_[i];
+    bool assigned = false;
+    bool dependency_assigned = false;
+    for (int64_t j = 0; j < table_assign.assignments_.count(); ++j) {
+      const ObAssignment &as = table_assign.assignments_.at(j);
+      const ColumnItem *column_item = NULL;
+      if (OB_ISNULL(as.column_expr_)
+          || OB_ISNULL(column_item = stmt->get_column_item_by_id(
+                           as.column_expr_->get_table_id(),
+                           as.column_expr_->get_column_id()))) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("failed to get assigned column item", K(ret));
+      } else if (as.column_expr_->get_table_id() != table_item.table_id_) {
+        // another table of a multi table update
+      } else if (column_item->base_cid_ == col.column_id_) {
+        assigned = true;
+      } else {
+        for (int64_t d = 0; !dependency_assigned && d < col.dep_count_; ++d) {
+          dependency_assigned = (column_item->base_cid_ == col.dep_ids_[d]);
+        }
+        for (int64_t p = 0; !dependency_assigned && p < meta.pk_count_; ++p) {
+          dependency_assigned = (column_item->base_cid_ == meta.pk_ids_[p]);
+        }
+      }
+    }
+    bool has_vec_index = false;
+    ObIndexType index_type = INDEX_TYPE_MAX;
+    if (OB_FAIL(ret) || assigned || !dependency_assigned) {
+      // nothing to invalidate for this column
+    } else if (OB_FAIL(ObVectorIndexUtil::check_column_has_vector_index(
+                   table_schema, schema_guard, col.column_id_,
+                   has_vec_index, index_type))) {
+      LOG_WARN("failed to check ai column vector index", K(ret), K(col.column_id_));
+    } else if (!has_vec_index) {
+      // the dml side invalidates the value itself, no extra assignment needed
+      LOG_INFO("ai column invalidated without vector index", K(table_item.table_id_),
+               K(col.column_id_));
+    } else {
+      const ObColumnSchemaV2 *column_schema = table_schema.get_column_schema(col.column_id_);
+      ObSEArray<ObColumnRefRawExpr *, 1> col_exprs;
+      ColumnItem *col_item = NULL;
+      ObAssignment assignment;
+      if (OB_ISNULL(column_schema)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(add_column_to_stmt(table_item, *column_schema, col_exprs))) {
+      } else if (col_exprs.empty()) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_ISNULL(col_item = stmt->get_column_item_by_id(
+                             table_item.table_id_, col_exprs.at(0)->get_column_id()))) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        assignment.column_expr_ = col_item->expr_;
+        assignment.is_implicit_ = true;
+        if (OB_FAIL(ObRawExprUtils::build_null_expr(*params_.expr_factory_, assignment.expr_))) {
+        } else if (OB_FAIL(ObRawExprUtils::build_column_conv_expr(*params_.expr_factory_,
+                                                                  *params_.allocator_,
+                                                                  *col_item->get_expr(),
+                                                                  assignment.expr_,
+                                                                  session_info_))) {
+        } else if (OB_FAIL(table_assign.assignments_.push_back(assignment))) {
+        } else {
+          LOG_INFO("invalidate ai column with vector index", K(table_item.table_id_),
+                   K(col.column_id_));
+        }
+      }
     }
   }
   return ret;
