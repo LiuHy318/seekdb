@@ -1108,8 +1108,6 @@ constexpr int OB_ERR_XML_NOT_SUPPORT_OPERATION = -7430;
 constexpr int OB_ERR_XML_PARENT_ALREADY_CONTAINS_CHILD = -7433;
 constexpr int OB_ERR_CONVERSION_OF_UNIT = -7434;
 constexpr int OB_ERR_PARAM_OUT_OF_RANGE = -7435;
-constexpr int OB_ERR_AI_COLUMN_DIM_MISMATCH = -7600;
-constexpr int OB_ERR_AI_COLUMN_NOT_READY = -11120;
 constexpr int OB_ERR_BAD_VEC_INDEX_COLUMN = -7601;
 constexpr int OB_ERR_VSAG_MEM_LIMIT_EXCEEDED = -7603;
 constexpr int OB_VECTOR_INDEX_ADAPTIVE_NEED_RETRY = -7605;
@@ -1214,6 +1212,7 @@ constexpr int OB_AI_FUNC_PARAM_VALUE_INVALID = -11116;
 constexpr int OB_AI_FUNC_PARAM_TYPE_INVALID = -11117;
 constexpr int OB_AI_FUNC_MODEL_NOT_FOUND = -11118;
 constexpr int OB_AI_FUNC_MODEL_EXISTS = -11119;
+constexpr int OB_AI_COLUMN_NOT_READY = -11120;
 constexpr int OB_CLOB_ONLY_SUPPORT_WITH_MULTIBYTE_FUN = -22998;
 constexpr int OB_ERR_UPDATE_TWICE = -30926;
 constexpr int OB_ERR_SNAPSHOT_QUERY_WITH_UPDATE = -32491;
@@ -2649,8 +2648,6 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_ERR_CONVERSION_OF_UNIT__USER_ERROR_MSG "conversion error between the specified unit and standard unit"
 #define OB_ERR_PARAM_OUT_OF_RANGE__USER_ERROR_MSG "value is out of range"
 #define OB_ERR_INVALID_VECTOR_DIM__USER_ERROR_MSG "inconsistent dimension: expected %u got %u"
-#define OB_ERR_AI_COLUMN_DIM_MISMATCH__USER_ERROR_MSG "inconsistent dimension: expected %d got %d"
-#define OB_ERR_AI_COLUMN_NOT_READY__USER_ERROR_MSG "AI column has unfinished tasks for table_id=%lu, column_id=%lu"
 #define OB_ERR_BAD_VEC_INDEX_COLUMN__USER_ERROR_MSG "Column '%.*s' cannot be part of VECTOR index"
 #define OB_ERR_ARRAY_TYPE_MISMATCH__USER_ERROR_MSG "array type mismatch found between definition(%.*s) and data(%.*s)"
 #define OB_ERR_VSAG_MEM_LIMIT_EXCEEDED__USER_ERROR_MSG "Vector index memory usage exceeds user defined limit '%d'M."
@@ -2765,6 +2762,7 @@ constexpr int OB_ERR_INVALID_DATE_MSG_FMT_V2 = -4219;
 #define OB_AI_FUNC_PARAM_TYPE_INVALID__USER_ERROR_MSG "This type of param \'%.*s\' is invalid, should be %.*s"
 #define OB_AI_FUNC_MODEL_NOT_FOUND__USER_ERROR_MSG "This AI model \'%.*s\' was not found"
 #define OB_AI_FUNC_MODEL_EXISTS__USER_ERROR_MSG "This ai model \'%.*s\' is already exists"
+#define OB_AI_COLUMN_NOT_READY__USER_ERROR_MSG "AI column has unfinished tasks for table_id=%lu, column_id=%lu"
 #define OB_CLOB_ONLY_SUPPORT_WITH_MULTIBYTE_FUN__USER_ERROR_MSG "CLOB or NCLOB in multibyte character set not supported"
 #define OB_ERR_UPDATE_TWICE__USER_ERROR_MSG "unable to get a stable set of rows in the source tables"
 #define OB_ERR_SNAPSHOT_QUERY_WITH_UPDATE__USER_ERROR_MSG "snapshot expression not allowed here"

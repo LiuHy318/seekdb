@@ -157,6 +157,9 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
       }
     }
   }
+  if (OB_FAIL(ret)) {
+    LOG_ERROR("eval_ai_complete failed", K(ret));
+  }
   return ret;
 }
 

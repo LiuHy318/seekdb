@@ -37,8 +37,8 @@ const char *VALID_PROVIDERS[] = {
   "SILICONFLOW",
   "COHERE",
   "HUNYUAN-OPENAI",
-  "OLLAMA",
-  "OPENAI"
+  "OPENAI",
+  "OLLAMA"
 };
 
 #define EXTRACT_JSON_ELEM_STR(json_key, member) \
@@ -113,9 +113,7 @@ int ObAiModelEndpointInfo::check_valid() const
   } else if (url_.empty()) {
     ret = OB_AI_FUNC_PARAM_EMPTY;
     LOG_USER_ERROR(OB_AI_FUNC_PARAM_EMPTY, strlen("url"), "url");
-  } else if (access_key_.empty() && provider_.case_compare("OLLAMA") != 0) {
-    // Ollama is addressed on a private host and does not use an API key, so an
-    // empty access_key is a valid configuration for that provider only.
+  } else if (access_key_.empty() && provider_.case_compare(ObString("ollama")) != 0) {
     ret = OB_AI_FUNC_PARAM_EMPTY;
     LOG_USER_ERROR(OB_AI_FUNC_PARAM_EMPTY, strlen("access_key"), "access_key");
     LOG_WARN("access_key is empty", K(ret), K(*this));
@@ -187,7 +185,9 @@ int ObAiModelEndpointInfo::merge_delta_endpoint(common::ObArenaAllocator &alloca
 int ObAiModelEndpointInfo::encrypt_access_key_(ObIAllocator &allocator, const ObString &access_key, ObString &encrypted_access_key)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(ob_write_string(allocator, access_key, encrypted_access_key))) {
+  if (access_key.empty()) {
+    encrypted_access_key.reset();
+  } else if (OB_FAIL(ob_write_string(allocator, access_key, encrypted_access_key))) {
   }
   return ret;
 }
@@ -196,8 +196,6 @@ int ObAiModelEndpointInfo::decrypt_access_key_(ObIAllocator &allocator, const Ob
 {
   int ret = OB_SUCCESS;
   if (encrypted_access_key.empty()) {
-    // Providers such as Ollama run without an API key; an empty key must stay
-    // empty instead of failing the whole request.
     unencrypted_access_key.reset();
   } else if (OB_FAIL(ob_write_string(allocator, encrypted_access_key, unencrypted_access_key))) {
   }

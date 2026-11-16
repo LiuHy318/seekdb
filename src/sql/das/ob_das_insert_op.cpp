@@ -16,7 +16,6 @@
 
 #define USING_LOG_PREFIX SQL_DAS
 #include "sql/das/ob_das_insert_op.h"
-#include "sql/das/ob_das_ai_column_observer.h"
 #include "data_plane/ob_i_dml_service.h"
 #include "data_plane/ob_i_write_context_service.h"
 #include "data_plane/transaction/ob_i_transaction_service.h"
@@ -55,9 +54,6 @@ int ObDASIndexDMLAdaptor<DAS_OP_TABLE_INSERT, ObDASDMLIterator>::write_rows(cons
                                                                             int64_t &affected_rows)
 {
   int ret = OB_SUCCESS;
-  if (OB_SUCC(ret) && is_ai_column_table(ctdef.table_id_)) {
-    observe_ai_column_rows(ctdef, tx_desc_, iter, AI_COLUMN_DML_INSERT);
-  }
   data_plane::ObIDmlService *as = ::oceanbase::share::server_service<::oceanbase::data_plane::ObIDmlService>();
   if (rtdef.use_put_) {
     ret = as->put_rows(tablet_id,

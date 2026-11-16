@@ -16,7 +16,6 @@
 
 #define USING_LOG_PREFIX SQL_DAS
 #include "sql/das/ob_das_update_op.h"
-#include "sql/das/ob_das_ai_column_observer.h"
 #include "data_plane/blocksstable/ob_datum_row_factory.h"
 #include "data_plane/ob_i_dml_service.h"
 #include "share/rc/ob_server_runtime.h"
@@ -377,9 +376,6 @@ int ObDASIndexDMLAdaptor<DAS_OP_TABLE_UPDATE, ObDASUpdIterator>::write_rows(cons
                                                                             int64_t &affected_rows)
 {
   int ret = OB_SUCCESS;
-  // AI column: the invalidation is written by this very update
-  ObAiColumnUpdateContext ai_column_ctx(ctdef, tx_desc_, iter);
-  (void)ai_column_ctx.init();
   data_plane::ObIDmlService *as = ::oceanbase::share::server_service<::oceanbase::data_plane::ObIDmlService>();
   if (OB_UNLIKELY((ctdef.table_param_.get_data_table().is_vector_delta_buffer() ||
                   ctdef.table_param_.get_data_table().is_hybrid_vector_index_log()) &&
@@ -404,8 +400,8 @@ int ObDASIndexDMLAdaptor<DAS_OP_TABLE_UPDATE, ObDASUpdIterator>::write_rows(cons
                                      *tx_desc_,
                                      dml_execution_,
                                      ctdef.column_ids_,
-                                     ai_column_ctx.get_updated_column_ids(),
-                                     ai_column_ctx.get_iterator(),
+                                     ctdef.updated_column_ids_,
+                                     &iter,
                                      affected_rows))) {
     if (OB_TRY_LOCK_ROW_CONFLICT != ret) {
     }

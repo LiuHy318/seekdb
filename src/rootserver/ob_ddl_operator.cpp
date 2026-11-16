@@ -2591,14 +2591,6 @@ int ObDDLOperator::update_table_attribute(ObTableSchema &new_table_schema,
         update_object_status_ignore_version,
         ddl_stmt_str))) {
     }
-    if (OB_SUCC(ret)) {
-      if (OB_FAIL(schema_service_impl->get_table_sql_service().check_ai_column_dimension(new_table_schema))) {
-        RS_LOG(WARN, "ai column dimension mismatch", K(ret), K(new_table_schema.get_table_id()));
-      } else if (OB_FAIL(schema_service_impl->get_table_sql_service().insert_ai_column_metadata_for_table(
-                     trans, new_table_schema))) {
-        RS_LOG(WARN, "failed to insert ai column metadata", K(ret), K(new_table_schema.get_table_id()));
-      }
-    }
   }
   return ret;
 }

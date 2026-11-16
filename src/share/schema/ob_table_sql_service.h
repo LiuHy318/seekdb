@@ -38,10 +38,6 @@ class ObColumnSchemaV2;
 class ObTableSqlService : public ObDDLSqlService
 {
 public:
-  int insert_ai_column_metadata_for_table(common::ObISQLClient &sql_client,
-                                         const ObTableSchema &table);
-  int check_ai_column_dimension(const ObTableSchema &table);
-  int check_ai_column_dependency(const ObTableSchema &table);
   ObTableSqlService(ObSchemaService &schema_service,
                     ObMultiVersionSchemaService &multi_version_schema_service)
     : ObDDLSqlService(schema_service),
@@ -64,6 +60,21 @@ public:
       const ObColumnSchemaV2 &column,
       share::ObDMLSqlSplicer &dml,
       const bool is_history = false);
+  static int gen_ai_column_dml(
+      const ObTableSchema &table,
+      const ObColumnSchemaV2 &column,
+      share::ObDMLSqlSplicer &dml);
+  static int insert_ai_column(
+      common::ObISQLClient &sql_client,
+      const ObTableSchema &table,
+      const ObColumnSchemaV2 &column);
+  static int delete_ai_columns(
+      common::ObISQLClient &sql_client,
+      const uint64_t table_id);
+  static int delete_ai_column(
+      common::ObISQLClient &sql_client,
+      const uint64_t table_id,
+      const uint64_t column_id);
   virtual int batch_create_table(ObIArray<ObTableSchema> &tables,
                            common::ObISQLClient &sql_client,
                            const common::ObString *ddl_stmt_str = NULL,
@@ -366,11 +377,6 @@ private:
   int add_columns_dml(const ObTableSchema &table,
       share::ObDMLSqlSplicer &all_column_dml,
       int64_t &column_count);
-  int insert_ai_column_metadata(common::ObISQLClient &sql_client,
-                                 const common::ObIArray<ObTableSchema> &tables);
-  int insert_ai_column_metadata(common::ObISQLClient &sql_client,
-                                 const ObTableSchema &table,
-                                 const ObColumnSchemaV2 &column);
   int batch_add_columns_for_create_table(common::ObISQLClient &sql_client,
       const ObIArray<ObTableSchema> &table);
   int add_columns_for_core(common::ObISQLClient &sql_client, const ObTableSchema &table);

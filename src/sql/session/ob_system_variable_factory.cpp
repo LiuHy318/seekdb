@@ -1276,6 +1276,7 @@ int ObSysVarFactory::create_all_sys_vars_()
         + sizeof(ObSysVarObHnswExtraInfoMaxSize)
         + sizeof(ObSysVarPushJoinPredicate)
         + sizeof(ObSysVarObSparseDropRatioSearch)
+        + sizeof(ObSysVarEnableFileSql)
         + sizeof(ObSysVarAiColumnStrictRead)
         ;
     void *ptr = NULL;
@@ -7757,6 +7758,15 @@ int ObSysVarFactory::create_all_sys_vars_()
       }
     }
     if (OB_SUCC(ret)) {
+      if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarEnableFileSql())) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("fail to new ObSysVarEnableFileSql", K(ret));
+      } else {
+        store_buf_[share::ObSysVarsToIdxMap::get_store_idx(static_cast<int64_t>(share::SYS_VAR_ENABLE_FILE_SQL))] = sys_var_ptr;
+        ptr = (void *)((char *)ptr + sizeof(ObSysVarEnableFileSql));
+      }
+    }
+    if (OB_SUCC(ret)) {
       if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarAiColumnStrictRead())) {
         ret = OB_ALLOCATE_MEMORY_FAILED;
         LOG_ERROR("fail to new ObSysVarAiColumnStrictRead", K(ret));
@@ -10664,6 +10674,10 @@ int ObSysVarFactory::create_sys_var(ObIAllocator &allocator_, share::ObSysVarCla
     }
     case share::SYS_VAR_OB_SPARSE_DROP_RATIO_SEARCH: {
       ret = create_one_sys_var<ObSysVarObSparseDropRatioSearch>(allocator_, sys_var_ptr, "ObSysVarObSparseDropRatioSearch");
+      break;
+    }
+    case share::SYS_VAR_ENABLE_FILE_SQL: {
+      ret = create_one_sys_var<ObSysVarEnableFileSql>(allocator_, sys_var_ptr, "ObSysVarEnableFileSql");
       break;
     }
     case share::SYS_VAR_AI_COLUMN_STRICT_READ: {

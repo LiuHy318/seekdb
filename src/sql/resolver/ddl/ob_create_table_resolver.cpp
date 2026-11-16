@@ -896,48 +896,6 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
       }
     }
 
-    // AI column: every AI column materialises three hidden columns that carry the
-    // per row state, the in flight request id and the result specification.
-    if (OB_SUCC(ret)) {
-      const int64_t ai_scan_cnt = resolved_cols.count();
-      for (int64_t i = 0; OB_SUCC(ret) && i < ai_scan_cnt; ++i) {
-        ObColumnSchemaV2 &ai_col = resolved_cols.at(i);
-        const ObString ai_comment = ai_col.get_comment_str();
-        if (ai_comment.length() <= 0 || NULL == strstr(ai_comment.ptr(), "\"ai_column\":1")) {
-          // not an ai column
-        } else {
-          static const char *AI_HIDDEN_PREFIX[3] = {"__ai_state_", "__ai_request_", "__ai_spec_"};
-          for (int64_t k = 0; OB_SUCC(ret) && k < 3; ++k) {
-            ObColumnSchemaV2 hidden_col;
-            char name_buf[OB_MAX_COLUMN_NAME_LENGTH];
-            int64_t name_len = snprintf(name_buf, sizeof(name_buf), "%s%.*s", AI_HIDDEN_PREFIX[k],
-                                        ai_col.get_column_name_str().length(),
-                                        ai_col.get_column_name_str().ptr());
-            if (OB_UNLIKELY(name_len <= 0 || name_len >= static_cast<int64_t>(sizeof(name_buf)))) {
-              ret = OB_ERR_UNEXPECTED;
-            } else if (OB_FAIL(hidden_col.set_column_name(ObString(static_cast<int32_t>(name_len), name_buf)))) {
-            } else {
-              hidden_col.set_column_id(gen_column_id());
-              hidden_col.set_is_hidden(true);
-              hidden_col.set_nullable(true);
-              if (0 == k) {
-                hidden_col.set_data_type(ObIntType);
-              } else {
-                hidden_col.set_data_type(ObVarcharType);
-                hidden_col.set_data_length(0 == k ? 128 : 1024);
-                hidden_col.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
-                hidden_col.set_charset_type(CHARSET_UTF8MB4);
-              }
-              ObColumnNameHashWrapper name_key(hidden_col.get_column_name_str());
-              if (OB_FAIL(table_schema.add_column(hidden_col))) {
-              } else if (OB_FAIL(column_name_set_.set_refactored(name_key))) {
-              }
-            }
-          }
-        }
-      }
-    }
-
     // A table must have at least one column as a visible column
     if (OB_SUCC(ret)) {
       // RESOLVE_NON_COL == resolve_rule when, only parse non-column definitions
@@ -962,6 +920,40 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
       if (OB_SUCC(ret) && !has_non_hidden_column) {
         ret = OB_ERR_AT_LEAST_ONE_COLUMN_NOT_VIRTUAL;
         SQL_RESV_LOG(WARN, "table must have at least one column that is not hidden", K(ret));
+      }
+    }
+
+    // AI columns: validate dependencies and create the hidden columns they need
+    if (OB_SUCC(ret)) {
+      ObSEArray<uint64_t, 8> ai_column_ids;
+      ObSEArray<ObString, 8> ai_column_names;
+      for (int64_t i = 0; OB_SUCC(ret) && i < table_schema.get_column_count(); ++i) {
+        const ObColumnSchemaV2 *column = table_schema.get_column_schema_by_idx(i);
+        if (OB_ISNULL(column)) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (column->is_ai_column()) {
+          OZ(ai_column_ids.push_back(column->get_column_id()));
+          OZ(ai_column_names.push_back(column->get_column_name_str()));
+        }
+      }
+      if (OB_SUCC(ret) && !ai_column_names.empty()) {
+        if (OB_FAIL(ObDDLResolver::check_ai_column_dependency(node, ai_column_names))) {
+        } else {
+          for (int64_t i = 0; OB_SUCC(ret) && i < ai_column_ids.count(); ++i) {
+            ObColumnSchemaV2 *ai_column = table_schema.get_column_schema(ai_column_ids.at(i));
+            if (OB_ISNULL(ai_column)) {
+              ret = OB_ERR_UNEXPECTED;
+            } else if (OB_INVALID_ID != ai_column->get_ai_state_column_id()) {
+              // hidden columns already created, e.g. resolve_table_elements is called twice
+            } else {
+              const uint64_t first_hidden_id = gen_column_id();
+              if (OB_FAIL(table_schema.add_ai_hidden_columns(*ai_column, first_hidden_id))) {
+              } else {
+                cur_column_id_ += 2;
+              }
+            }
+          }
+        }
       }
     }
 
