@@ -154,12 +154,17 @@ static std::shared_ptr<void> ob_cuvs_build_big_stack(const float *base, long n, 
 }
 static void ob_cuvs_register(void *key, const float *vectors, const int64_t *ids,
                              int dim, int size) {
+  const int64_t t0 = ObTimeUtility::current_time();
   ObCuvsEntry *ent = new ObCuvsEntry();
   ent->bridge_ = ob_cuvs_build_big_stack(vectors, size, dim);
+  const int64_t build_us = ObTimeUtility::current_time() - t0;
   ent->dim_ = dim;
   ent->buf_vecs_.assign(vectors, vectors + static_cast<size_t>(dim) * size);
   ent->buf_ids_.assign(ids, ids + size);
+  const int64_t total_us = ObTimeUtility::current_time() - t0;
   if (ent->bridge_ != nullptr) { ent->ids_ = ent->buf_ids_; ent->built_n_ = size; }
+  LOG_INFO("[OBVSAG][cuVS] register", KP(key), K(size), K(dim), K(build_us), K(total_us),
+           "copy_us", total_us - build_us);
   std::lock_guard<std::mutex> guard(g_ob_cuvs_mu);
   ObCuvsEntry *&slot = g_ob_cuvs_reg[key];
   delete slot;
@@ -279,7 +284,8 @@ static bool ob_cuvs_try_search(void *key, vsag::Allocator *alloc,
   // a 32MB-stack pthread (cuVS overflows the OB worker stack otherwise).
   const size_t n = ent->buf_ids_.size();
   const bool need_build =
-      (n >= OB_CUVS_MIN_PTS && (ent->bridge_ == nullptr || n >= ent->built_n_ * 2));
+      (n >= OB_CUVS_MIN_PTS && ent->buf_vecs_.size() == n * static_cast<size_t>(ent->dim_) &&
+       (ent->bridge_ == nullptr || n >= ent->built_n_ * 2));
   std::vector<unsigned> off(topk);
   std::vector<float> dst(topk);
   ObCuvsJob job{ent, query, topk, static_cast<int>(ent->dim_), n, need_build, &off, &dst, -1, false};
@@ -393,6 +399,10 @@ static bool ob_cuvs_serialize(void *key, std::ostream &out, int &ret) {
   }
   const int64_t start_us = ObTimeUtility::current_time();
   bool built = false;
+  if (ent->buf_vecs_.empty() && ent->bridge_ == nullptr) {
+    // Loaded from a snapshot that carries no raw vectors: nothing to build from.
+    return false;
+  }
   if (ent->bridge_ == nullptr || ent->built_n_ != n) {
     std::shared_ptr<void> nb = ob_cuvs_build_big_stack(ent->buf_vecs_.data(),
                                                        static_cast<long>(n), ent->dim_);
@@ -405,6 +415,7 @@ static bool ob_cuvs_serialize(void *key, std::ostream &out, int &ret) {
     ent->bridge_ = nb; ent->built_n_ = n; ent->ids_ = ent->buf_ids_;
     built = true;
   }
+  const int64_t t_ser0 = ObTimeUtility::current_time();
   ObCuvsSnapshotFile graph;
   ObCuvsSnapshotJob job{graph.path_, ent->bridge_.get(), static_cast<long>(n), ent->dim_, false, -1};
   if (graph.file_ == nullptr || !ob_cuvs_snapshot_big_stack(job) ||
@@ -412,23 +423,30 @@ static bool ob_cuvs_serialize(void *key, std::ostream &out, int &ret) {
     ret = OB_ERR_VSAG_RETURN_ERROR;
     return true;
   }
+  const int64_t ser_us = ObTimeUtility::current_time() - t_ser0;
   const uint64_t graph_bytes = static_cast<uint64_t>(::ftello(graph.file_));
   ::rewind(graph.file_);
   const int64_t build_us = ObTimeUtility::current_time() - start_us;
   const int32_t dim32 = ent->dim_;
   const int32_t reserved = 0;
   const int64_t n64 = static_cast<int64_t>(n);
+  const int64_t t_meta0 = ObTimeUtility::current_time();
+  // The CAGRA blob already carries its dataset (cuvsCagraSerialize(..., true)),
+  // so the snapshot stores ids + graph only. Writing the raw vectors a second
+  // time doubled the blob (250K x 128 -> ~420 MB) and that cost was paid on
+  // every DDL flush and on every load.
   if (!ob_cuvs_write(out, OB_CUVS_SNAPSHOT_MAGIC, sizeof(OB_CUVS_SNAPSHOT_MAGIC)) ||
       !ob_cuvs_write(out, &graph_bytes, sizeof(graph_bytes)) ||
       !ob_cuvs_write(out, &dim32, sizeof(dim32)) ||
       !ob_cuvs_write(out, &reserved, sizeof(reserved)) ||
       !ob_cuvs_write(out, &n64, sizeof(n64)) ||
-      !ob_cuvs_write(out, ent->buf_ids_.data(), n * sizeof(int64_t)) ||
-      !ob_cuvs_write(out, ent->buf_vecs_.data(), ent->buf_vecs_.size() * sizeof(float))) {
+      !ob_cuvs_write(out, ent->buf_ids_.data(), n * sizeof(int64_t))) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("[OBVSAG][cuVS] failed to write snapshot stream", K(ret), KP(key), K(n));
     return true;
   }
+  const int64_t meta_us = ObTimeUtility::current_time() - t_meta0;
+  const int64_t t_graph0 = ObTimeUtility::current_time();
   std::vector<char> chunk(65536);
   uint64_t remaining = graph_bytes;
   while (remaining > 0) {
@@ -439,14 +457,16 @@ static bool ob_cuvs_serialize(void *key, std::ostream &out, int &ret) {
     }
     remaining -= bytes;
   }
+  const int64_t graph_us = ObTimeUtility::current_time() - t_graph0;
   LOG_INFO("[OBVSAG][cuVS] serialized GPU CAGRA snapshot", KP(key), K(n), K(dim32),
-           K(built), K(build_us), K(graph_bytes));
+           K(built), K(build_us), K(ser_us), K(meta_us), K(graph_us), K(graph_bytes));
   return true;
 }
 
 // Consumes the stream after the magic. Registers and marks the handle for GPU search.
 static int ob_cuvs_deserialize(void *key, int expected_dim, std::istream &in) {
   int ret = OB_SUCCESS;
+  const int64_t deser_start_us = ObTimeUtility::current_time();
   uint64_t graph_bytes = 0;
   int32_t dim32 = 0;
   int32_t reserved = 0;
@@ -467,9 +487,7 @@ static int ob_cuvs_deserialize(void *key, int expected_dim, std::istream &in) {
     ObCuvsEntry *ent = new ObCuvsEntry();
     ent->dim_ = dim32;
     ent->buf_ids_.resize(n);
-    ent->buf_vecs_.resize(n * static_cast<size_t>(dim32));
-    if (!ob_cuvs_read(in, ent->buf_ids_.data(), n * sizeof(int64_t)) ||
-        !ob_cuvs_read(in, ent->buf_vecs_.data(), ent->buf_vecs_.size() * sizeof(float))) {
+    if (!ob_cuvs_read(in, ent->buf_ids_.data(), n * sizeof(int64_t))) {
       delete ent;
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("[OBVSAG][cuVS] truncated snapshot payload", K(ret), KP(key), K(n64));
@@ -506,7 +524,7 @@ static int ob_cuvs_deserialize(void *key, int expected_dim, std::istream &in) {
         g_ob_cuvs_marked.insert(key);
       }
       LOG_INFO("[OBVSAG][cuVS] deserialized GPU CAGRA snapshot", KP(key), K(n64), K(dim32),
-               K(graph_bytes));
+               K(graph_bytes), "us", ObTimeUtility::current_time() - deser_start_us);
     }
   }
   return ret;
@@ -2081,7 +2099,8 @@ long cuvs_knn_search_batch(void *key, const float *queries, long nq, long topk,
   ObCuvsEntry *ent = it->second;
   const size_t n = ent->buf_ids_.size();
   const bool need_build =
-      (n >= OB_CUVS_MIN_PTS && (ent->bridge_ == nullptr || n >= ent->built_n_ * 2));
+      (n >= OB_CUVS_MIN_PTS && ent->buf_vecs_.size() == n * static_cast<size_t>(ent->dim_) &&
+       (ent->bridge_ == nullptr || n >= ent->built_n_ * 2));
   std::vector<unsigned> off(static_cast<size_t>(nq) * topk);
   std::vector<float> dst(static_cast<size_t>(nq) * topk);
   ObCuvsBatchJob job{ent, queries, nq, topk, n, need_build,
