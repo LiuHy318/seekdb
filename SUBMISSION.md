@@ -137,3 +137,11 @@ cmake --build build_release --target seekdb -- -j64
 * `lib=cuvs` 仍只支持稠密 FP32 + L2，与基线一致；余弦/内积在 DDL 阶段拒绝。
 * 图度数 192 是一个**保守取值**：更高度数（224/256）在同样数据上 Recall 更高，但会让
   检索耗时逼近 0.8x 基线，反而有丢查询分的风险，因此停在 192。
+
+## 7 v9（`graph_degree` 160）
+
+* 变更：`SK_CUVS_DEFAULT_GRAPH_DEGREE` 192 -> 160，其余（`AUTO_SELECT`、中间图 256、
+  `nn_descent_niter=100`、查询缓冲复用）不变。
+* 原因：同轮评测出现 `hidden250k:query_regression`，192 度图在 256 维上把查询吞吐压到
+  0.90x 门禁线附近；160 度在本地配对实测里查询中位快约 5%，Recall 仍高于冻结基线。
+* 代价：相对 192 度，Recall 余量减少约 0.002（远小于 0.005 的下降预算），建图略快。

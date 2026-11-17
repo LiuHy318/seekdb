@@ -72,7 +72,7 @@ typedef struct {
 /*   SEEKDB_CUVS_NITER=100            restores the exact baseline build       */
 /* ------------------------------------------------------------------------- */
 
-#define SK_CUVS_DEFAULT_GRAPH_DEGREE        192
+#define SK_CUVS_DEFAULT_GRAPH_DEGREE        160
 #define SK_CUVS_DEFAULT_INTERMEDIATE_DEGREE 256
 #define SK_CUVS_DEFAULT_NITER               100
 
