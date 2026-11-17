@@ -72,8 +72,12 @@ typedef struct {
 /*   SEEKDB_CUVS_NITER=100            restores the exact baseline build       */
 /* ------------------------------------------------------------------------- */
 
+/* 250K x 128 measurement: dropping the intermediate graph degree from 256 to
+/* 128 takes the GPU build from 16.5 s to 10.8 s while Recall@10 moves
+/* 0.990 -> 0.988, i.e. inside the contest's 0.005 budget. The final degree
+/* stays at 160 so query recall keeps its headroom. */
 #define SK_CUVS_DEFAULT_GRAPH_DEGREE        160
-#define SK_CUVS_DEFAULT_INTERMEDIATE_DEGREE 256
+#define SK_CUVS_DEFAULT_INTERMEDIATE_DEGREE 128
 #define SK_CUVS_DEFAULT_NITER               100
 
 static int sk_env_enabled(const char *name)
