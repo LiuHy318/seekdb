@@ -416,49 +416,34 @@ static bool ob_cuvs_serialize(void *key, std::ostream &out, int &ret) {
     built = true;
   }
   const int64_t t_ser0 = ObTimeUtility::current_time();
-  ObCuvsSnapshotFile graph;
-  ObCuvsSnapshotJob job{graph.path_, ent->bridge_.get(), static_cast<long>(n), ent->dim_, false, -1};
-  if (graph.file_ == nullptr || !ob_cuvs_snapshot_big_stack(job) ||
-      ::fseeko(graph.file_, 0, SEEK_END) != 0 || ::ftello(graph.file_) <= 0) {
-    ret = OB_ERR_VSAG_RETURN_ERROR;
-    return true;
-  }
+  // The CAGRA graph is rebuilt from the persisted vectors when the index is
+  // loaded, so no cuvsCagraSerialize pass runs here and the snapshot carries no
+  // graph blob. That pass copied the dataset + graph (~420 MB at 250K x 128)
+  // through a temp file on every DDL flush and dominated the build window.
   const int64_t ser_us = ObTimeUtility::current_time() - t_ser0;
-  const uint64_t graph_bytes = static_cast<uint64_t>(::ftello(graph.file_));
-  ::rewind(graph.file_);
+  const uint64_t graph_bytes = 0;
   const int64_t build_us = ObTimeUtility::current_time() - start_us;
   const int32_t dim32 = ent->dim_;
   const int32_t reserved = 0;
   const int64_t n64 = static_cast<int64_t>(n);
   const int64_t t_meta0 = ObTimeUtility::current_time();
-  // The CAGRA blob already carries its dataset (cuvsCagraSerialize(..., true)),
-  // so the snapshot stores ids + graph only. Writing the raw vectors a second
-  // time doubled the blob (250K x 128 -> ~420 MB) and that cost was paid on
-  // every DDL flush and on every load.
+  // The vectors are the rebuild source, so they are the only payload written:
+  // ids + vectors ~= 130 MB at 250K x 128, down from ~420 MB when the CAGRA
+  // blob (which also duplicated the dataset) was stored as well.
   if (!ob_cuvs_write(out, OB_CUVS_SNAPSHOT_MAGIC, sizeof(OB_CUVS_SNAPSHOT_MAGIC)) ||
       !ob_cuvs_write(out, &graph_bytes, sizeof(graph_bytes)) ||
       !ob_cuvs_write(out, &dim32, sizeof(dim32)) ||
       !ob_cuvs_write(out, &reserved, sizeof(reserved)) ||
       !ob_cuvs_write(out, &n64, sizeof(n64)) ||
-      !ob_cuvs_write(out, ent->buf_ids_.data(), n * sizeof(int64_t))) {
+      !ob_cuvs_write(out, ent->buf_ids_.data(), n * sizeof(int64_t)) ||
+      !ob_cuvs_write(out, ent->buf_vecs_.data(), ent->buf_vecs_.size() * sizeof(float))) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("[OBVSAG][cuVS] failed to write snapshot stream", K(ret), KP(key), K(n));
     return true;
   }
   const int64_t meta_us = ObTimeUtility::current_time() - t_meta0;
-  const int64_t t_graph0 = ObTimeUtility::current_time();
-  std::vector<char> chunk(65536);
-  uint64_t remaining = graph_bytes;
-  while (remaining > 0) {
-    const size_t bytes = std::min<uint64_t>(remaining, chunk.size());
-    if (::fread(chunk.data(), 1, bytes, graph.file_) != bytes || !ob_cuvs_write(out, chunk.data(), bytes)) {
-      ret = OB_ERR_UNEXPECTED;
-      return true;
-    }
-    remaining -= bytes;
-  }
-  const int64_t graph_us = ObTimeUtility::current_time() - t_graph0;
-  LOG_INFO("[OBVSAG][cuVS] serialized GPU CAGRA snapshot", KP(key), K(n), K(dim32),
+  const int64_t graph_us = 0;
+  LOG_INFO("[OBVSAG][cuVS] serialized GPU CAGRA snapshot (ids+vectors)", KP(key), K(n), K(dim32),
            K(built), K(build_us), K(ser_us), K(meta_us), K(graph_us), K(graph_bytes));
   return true;
 }
@@ -478,7 +463,7 @@ static int ob_cuvs_deserialize(void *key, int expected_dim, std::istream &in) {
   } else if (dim32 <= 0 || dim32 != expected_dim || reserved != 0 || n64 <= 0 ||
              n64 > UINT32_MAX ||
              static_cast<uint64_t>(n64) > std::numeric_limits<size_t>::max() / sizeof(float) / dim32 ||
-             graph_bytes == 0 || graph_bytes > static_cast<uint64_t>(INT64_MAX)) {
+             graph_bytes > static_cast<uint64_t>(INT64_MAX)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("[OBVSAG][cuVS] invalid snapshot header", K(ret), KP(key), K(dim32),
              K(expected_dim), K(n64));
@@ -487,10 +472,29 @@ static int ob_cuvs_deserialize(void *key, int expected_dim, std::istream &in) {
     ObCuvsEntry *ent = new ObCuvsEntry();
     ent->dim_ = dim32;
     ent->buf_ids_.resize(n);
-    if (!ob_cuvs_read(in, ent->buf_ids_.data(), n * sizeof(int64_t))) {
+    ent->buf_vecs_.resize(n * static_cast<size_t>(dim32));
+    if (!ob_cuvs_read(in, ent->buf_ids_.data(), n * sizeof(int64_t)) ||
+        !ob_cuvs_read(in, ent->buf_vecs_.data(), ent->buf_vecs_.size() * sizeof(float))) {
       delete ent;
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("[OBVSAG][cuVS] truncated snapshot payload", K(ret), KP(key), K(n64));
+    } else if (graph_bytes == 0) {
+      // ids + vectors only: leave bridge_ empty so the first query rebuilds the
+      // CAGRA graph from the persisted vectors. The DDL path never gets here.
+      ent->built_n_ = 0;
+      ent->ids_ = ent->buf_ids_;
+      {
+        std::lock_guard<std::mutex> guard(g_ob_cuvs_mu);
+        ObCuvsEntry *&slot = g_ob_cuvs_reg[key];
+        delete slot;
+        slot = ent;
+      }
+      {
+        std::lock_guard<std::mutex> guard(g_ob_cuvs_marked_mu);
+        g_ob_cuvs_marked.insert(key);
+      }
+      LOG_INFO("[OBVSAG][cuVS] loaded GPU index metadata (graph rebuild pending)",
+               KP(key), K(n64), K(dim32), "us", ObTimeUtility::current_time() - deser_start_us);
     } else {
       ObCuvsSnapshotFile graph;
       std::vector<char> chunk(65536);
