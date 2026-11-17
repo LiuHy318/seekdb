@@ -251,3 +251,35 @@ Hidden250K 29～35 s（中位数约 30 s）。同轮之间本身有 5%～15% 波
 `SEEKDB_CUVS_GRAPH_DEGREE` 从 192 改成 160，优先保证门禁稳定；建图侧同样略快
 （15.4 s -> 14.7 s）。要继续把查询打到 1.0x 以上，需要的是服务端检索路径的改动，
 不是继续压低图度数（96/112 度在 256 维上有跌破 Recall 下降预算的风险）。
+
+
+### 2.7 2026-11-17 环境重建与端到端复测（Radeon Cloud gfx1100）
+
+**平台口径反解。** 用 v8 的 1.373x 与本地"250K×128 基线 GPU 40.4 s、192 度 15.0 s"换算出的
+GPU 比例 0.375 联立：`23 = F + G_b`、`16.75 = F + 0.375·G_b`，解得 `F ≈ 13 s`、`G_b ≈ 10 s`、
+v8 的 GPU 阶段 ≈ 3.75 s。也就是说窗口里有约 13 s 与 GPU 完全无关（DDL 行扫描、索引快照写读、
+CAGRA blob 的 serialize/deserialize），只改 bridge 的数学上限是 23/13 ≈ 1.77x（build 分约 10）。
+
+**本机端到端（同一实例、同一脚本、250K×128、单进程 observer、`create vector index` 起算到首查返回）：**
+
+| 配置 | create | 窗口 | 备注 |
+| --- | --- | --- | --- |
+| 基线（nn_descent 128/256/100） | 46.24 s | 53.37 s | 首查 0.049 s，中位 0.013 s |
+| 基线重复（同参数） | 46.41 s | 53.83 s | 两次差 0.4 s（<1%），脚本噪声可忽略 |
+
+**必须记录的坑：运行时旋钮在本仓不生效。** `SEEKDB_CUVS_BUILD_ALGO` /
+`SEEKDB_CUVS_GRAPH_DEGREE` / `SEEKDB_CUVS_NITER` 通过 env 传入后，两次 `create` 仍是
+46.2 s / 46.4 s，与桥内默认值完全一致。160 度是 bridge 的**编译期默认**
+（`SK_CUVS_DEFAULT_GRAPH_DEGREE`），必须重编 bridge 才会变；用环境变量做 A/B 会把
+两次基线误当成两次实验。
+
+**整仓编译（clang 22 + boost 1.8x）的两个真实阻塞，已定位并解掉（仅本机构建补丁，未进仓库）：**
+
+1. `boost/mpl/aux_/integral_wrapper.hpp` 的 `prior`/`next` 展开成
+   `integral_c<T, value∓1>`；当 `T` 是 boost 自带的 `udt_builtin_mixture_enum` /
+   `int_float_mixture_enum` / `sign_mixture_enum` 时，`-1`（或 `max+1`）越出枚举值域，
+   clang 22 直接判 `non-type template argument is not a constant expression`。
+   解：在 `boost/numeric/conversion/*_enum.hpp` 里给三个枚举各加 `-1` 与 `max+1` 哨兵。
+2. 链接期 `get_type_name(int)` 未定义：源码树里只有声明（`objit/common/ob_item_type.h`），
+   名字表没有随本仓分发。解：在 `src/sql/parser/parser_utility.cpp` 追加一个
+   `extern "C"` 桩（仅本机，未提交，平台构建不需要）。
