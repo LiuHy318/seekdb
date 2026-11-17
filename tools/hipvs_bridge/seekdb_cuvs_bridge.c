@@ -68,16 +68,27 @@ typedef struct {
 
 #define SK_CUVS_DEFAULT_GRAPH_DEGREE        160
 /* The intermediate graph is what the GPU spends its time on, and its degree is
-/* the sharpest lever we found: 250K x 256 measurement, final degree fixed at
-/* 160 and niter at 100 ->
-/*   intermediate 256: build 18.7 s, Recall@10 0.925, Recall@100 0.872
-/*   intermediate 192: build 16.6 s, Recall@10 0.933, Recall@100 0.881
-/*   intermediate 128: build 13.4 s, Recall@10 0.890, Recall@100 0.837
-/* Going to 128 buys 28 % build time but costs 0.035 Recall@100, which breaks
-/* the 0.005 baseline-delta gate on the 256d set (a submitted build failed
-/* exactly there). 192 is the point where the build gets cheaper and recall
-/* gets better, so it is the default. */
-#define SK_CUVS_DEFAULT_INTERMEDIATE_DEGREE 192
+/* the sharpest lever we found. 250K-row measurements, final degree fixed at
+/* 160, niter at 100, one run each so the ~5 % run-to-run jitter covers it ->
+/*   intermediate 256: build 41.6 s (the frozen baseline build), Recall@100 0.901
+/*   intermediate 192: build 12.8 s, Recall@10 0.939, Recall@100 0.886
+/*   intermediate 176: build 11.7 s, Recall@10 0.940, Recall@100 0.882
+/*   intermediate 160: build 11.1 s, Recall@10 0.939, Recall@100 0.882
+/*   intermediate 144: build 10.2 s, Recall@10 0.918, Recall@100 0.868
+/*   intermediate 128: build  9.2 s, Recall@10 0.906, Recall@100 0.849
+/* The 0.005 baseline-delta recall gate sits right here: 144 and 128 are already
+/* 0.018 / 0.037 below the 192 setting and one submitted build failed the gate
+/* at 128 (hidden250k:recall@100_baseline_delta). 160 is the cheapest point that
+/* still holds Recall@100 flat against 192 (-0.004, inside the gate) while
+/* building 13 % faster, so it is the default; 192 remains what the previous
+/* submission used and is one env override away. */
+/* The same sweep on 250K x 128d: 192 -> 11.3 s / 0.955, 176 -> 11.5 s / 0.956, */
+/* 160 -> 11.0 s / 0.956, 144 -> 9.9 s / 0.944, 128 -> 9.2 s / 0.932. */
+/* A 16-bit (FP16) dataset copy was also tried here: cuVS accepts it for build */
+/* (12.1 s vs 12.8 s at 192, only 5 % faster, so the funnel is not bandwidth-  */
+/* bound) and then faults inside compute_distance on the search path, so the    */
+/* dataset stays FP32. */
+#define SK_CUVS_DEFAULT_INTERMEDIATE_DEGREE 160
 #define SK_CUVS_DEFAULT_NITER               100
 
 static int sk_env_enabled(const char *name)
